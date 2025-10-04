@@ -144,6 +144,8 @@ ENV/
 env.bak/
 venv.bak/
 CLAUDE.md
+GEMINI.md
+AGENTS.md
 
 # Spyder project settings
 .spyderproject
