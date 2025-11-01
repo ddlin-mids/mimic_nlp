@@ -1,0 +1,84 @@
+{
+  "date": "2025-10-31",
+  "agents": ["codex-agent"],
+  "project": "MIMIC-IV 30-Day Readmission Risk Profiling",
+  "starting_plan": [
+    "Confirm cohort builder enforces \u226430-day readmissions with discharge and radiology notes",
+    "Align EHR preprocessing utilities with readmit-stgnn baseline",
+    "Segment readmitted cohort by LOS and ICD-10 to surface high-risk phenotypes"
+  ],
+  "data": {
+    "sources": [
+      "data/interim/cohort.csv",
+      "physionet.org/files/mimiciv/3.1/hosp/diagnoses_icd.csv.gz",
+      "physionet.org/files/mimiciv/3.1/hosp/d_icd_diagnoses.csv.gz"
+    ],
+    "rows_after_filters": 184154,
+    "transforms": [
+      "Segmented readmitted admissions into six LOS buckets",
+      "Merged ICD-10 diagnoses to readmitted admissions",
+      "Computed condition prevalence (AKI, HF, sepsis) per segment"
+    ],
+    "quality": {
+      "missing_pct": null,
+      "label_balance": {"pos": 0.171, "neg": 0.829}
+    }
+  },
+  "experiments": [
+    {
+      "id": "SEG-2",
+      "slice": "LOS 5-7d readmits",
+      "model": "segmentation-analysis",
+      "key_change": "Focused on transitional-care subset",
+      "metrics": {"admissions_pct": 32.7, "patients_pct": 42.8},
+      "notes": "Largest cohort share; chronic cardiometabolic codes dominate"
+    },
+    {
+      "id": "SEG-6",
+      "slice": "LOS >=22d readmits",
+      "model": "segmentation-analysis",
+      "key_change": "Isolated prolonged stays",
+      "metrics": {"aki_pct": 44.0, "sepsis_pct": 21.8},
+      "notes": "High-acuity cardio-renal + sepsis cluster"
+    }
+  ],
+  "analysis": {
+    "top_features": [
+      "Acute kidney injury codes (N17/584)",
+      "Congestive heart failure codes (I50/428)",
+      "Sepsis codes (A41/995.9)"
+    ],
+    "sanity_checks": [
+      "Verified no readmission gaps exceed 30 days",
+      "Confirmed all positives retain discharge and radiology text"
+    ]
+  },
+  "artifacts": [
+    {"name": "documents/reports/readmit-risk-cohort-segmentation-2025-10-31/report.md", "purpose": "Human-readable EOD summary"},
+    {"name": "documents/reports/readmit-risk-cohort-segmentation-2025-10-31/results.csv", "purpose": "Main LOS segment table"},
+    {"name": "documents/reports/readmit-risk-cohort-segmentation-2025-10-31/figure-1.png", "purpose": "LOS segment volume plot"},
+    {"name": "documents/reports/readmit-risk-cohort-segmentation-2025-10-31/figure-2.png", "purpose": "LOS histogram"}
+  ],
+  "impact": {
+    "utility": "Surfaced transitional-care vs complication-driven readmission cohorts for targeted modeling",
+    "robustness": "Condition prevalence computed over full 31k-readmit cohort with deterministic joins",
+    "decision_readiness": "Ready to branch modeling roadmap into short- vs long-stay risk tracks",
+    "risks": ["Chronic-disease segments may encode socioeconomic bias; requires contextual features"]
+  },
+  "deviations": [],
+  "open_questions": [
+    {"question": "Which discharge-note signals predict <=7d readmissions?", "evidence_needed": "NLP embedding analysis with qualitative review"},
+    {"question": "Are specific procedures driving >=22d readmits?", "evidence_needed": "Join CPT/ICU tables and analyze prevalence"},
+    {"question": "Does nephrotoxic medication exposure explain AKI spikes?", "evidence_needed": "Medication timeline extraction and dosage checks"}
+  ],
+  "next_steps": [
+    {"owner": "codex-agent", "action": "Merge labs/meds into LOS segments", "success": ">90% admissions with lab coverage and updated complication rates"},
+    {"owner": "analytics-team", "action": "Embed discharge notes for LOS extremes", "success": "Identify top linguistic themes differentiating <=7d vs >=15d"},
+    {"owner": "modeling-team", "action": "Prototype dual-branch readmission model", "success": "Validation AUROC improvement >=0.02 over single model"}
+  ],
+  "reproducibility": {
+    "entry_points": ["ehr/get_mimic_cohort.py", "python scripts for LOS segmentation (see analysis CSVs)"],
+    "config": {"los_bins": [0, 4, 7, 10, 14, 21, 1000]},
+    "lineage": "mimic_iv_v3.1 -> cohort filters -> LOS segmentation -> ICD joins -> condition summaries"
+  }
+}

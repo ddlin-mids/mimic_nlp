@@ -1,0 +1,7 @@
+Created Notebooks:
+1. 00_colab_utils.ipynb - Environment setup and utility functions
+2. 01_cohort_selection_and_labels.ipynb - Cohort filtering and label generation  
+3. 02_structured_events_hibehrt.ipynb - Clinical event processing for HiBEHRT
+4. 03_clinical_text_bert.ipynb - BioClinical BERT text encoding
+
+Location: /share/crsp/lab/pkaiser/ddlin/mids/datasci-266/mimic_nlp/notebooks/notebooks_dl/

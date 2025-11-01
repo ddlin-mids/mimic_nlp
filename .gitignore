@@ -223,6 +223,11 @@ uv.lock
 **/tf_summaries/
 **/AUTH_TOKEN
 **/data/
+!data/
+data/*
+!data/data_utils/
+!data/data_utils/**
+!data/__init__.py
 
 .venv/
 .uv_cache/
