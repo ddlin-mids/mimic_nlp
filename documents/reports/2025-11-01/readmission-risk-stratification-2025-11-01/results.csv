@@ -1,0 +1,7 @@
+Experiment ID,Data Slice,Model,Key Change,Metric 1,Metric 2,Notes
+E-LOS,LOS segments,aggregate,Stratified admissions by LOS bins,>=22d rate 26.8%,<=4d rate 13.4%,Risk rises monotonically with LOS; longest stays carry ~2x short-stay risk.
+E-Cluster,LOS≥15d cardio-renal/sepsis dx,aggregate,Added ICD-driven cardio-renal/sepsis flag,Cardio-renal readmit 25.7%,Other long LOS 23.6%,High-acuity cluster adds +2.1pp absolute risk despite similar LOS.
+E-Disposition,Discharge location (≥100 admissions),aggregate,Grouped dispositions & computed rates,Psych facility 45.9%,Home health 18.7%,Psych transfers dominate; skilled nursing/home health remain elevated.
+E-Followup,Discharge note follow-up language,aggregate,Keyword detection for follow-up documentation,No mention 18.7%,Mention present 16.9%,Documentation gap aligns with +1.8pp higher readmits across LOS bins.
+E-Labs,LOS≥15d labs (48h before discharge),aggregate,Pulled terminal creatinine/sodium,Cardio-renal Cr median 1.1,Non-cardio long Cr median 0.7,Renal burden persists near discharge among high-risk cluster.
+E-PriorUtil,Prior admissions buckets,aggregate,Counted prior stays per subject,3+ prior readmit 26.3%,0 prior 12.1%,Utilization history doubles risk; median age ~66 in high bucket.

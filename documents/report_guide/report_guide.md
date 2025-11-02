@@ -175,14 +175,14 @@ Each item: **owner, expected outcome, success criterion** (e.g., “AUPRC ≥ 0.
 
 # Save Artifacts Instructions
 
-**Save location:** `documents/reports/{meaningful_name_of_the_report}{date}/`
+**Save location:** `documents/reports/{date}/{meaningful_name_of_the_report}{date}/`
 
 **Do this exactly:**
 
 1. Create a meaningful slug for the report name from the project/task (lowercase, hyphen-separated, no spaces), e.g., `readmission-risk-ablation`.
 2. Use today’s date as `YYYY-MM-DD`, e.g., `2025-10-31`.
 3. Build the directory path:
-   `documents/reports/{slug}-{YYYY-MM-DD}/`
+   `documents/reports/{YYYY-MM-DD}/{slug}-{YYYY-MM-DD}/`
    If it already exists, append a numeric suffix `-v2`, `-v3`, … until unique.
 4. Save ALL outputs there with these exact filenames:
 

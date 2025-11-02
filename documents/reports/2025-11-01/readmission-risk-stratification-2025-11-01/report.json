@@ -1,0 +1,166 @@
+{
+  "date": "2025-11-01",
+  "agents": [
+    "codex-agent"
+  ],
+  "project": "MIMIC-IV 30-Day Readmission / Risk Stratification Analytics",
+  "starting_plan": [
+    "Quantify readmission rates across LOS and cardio-renal/sepsis clusters",
+    "Document findings per daily report guide",
+    "Explore discharge disposition, follow-up documentation, time-to-readmit, labs, medications, prior utilization, social text indicators"
+  ],
+  "data": {
+    "sources": [
+      "data/interim/cohort.csv",
+      "physionet.org/files/mimiciv/3.1/hosp/diagnoses_icd.csv.gz",
+      "physionet.org/files/mimiciv/3.1/hosp/labevents.csv.gz",
+      "physionet.org/files/mimiciv/3.1/hosp/prescriptions.csv.gz"
+    ],
+    "rows_after_filters": 184154,
+    "transforms": [
+      "ICD-derived cardio-renal/sepsis flags",
+      "LOS segmentation",
+      "Discharge disposition cleaning",
+      "Follow-up keyword detection",
+      "Readmission gap bucketing",
+      "Lab pull (48h pre-discharge)",
+      "Medication overlap within 48h",
+      "Prior utilization counts",
+      "Social-text heuristics"
+    ],
+    "quality": {
+      "missing_pct": null,
+      "label_balance": {
+        "pos": 0.17086243035720103,
+        "neg": 0.829137569642799
+      }
+    }
+  },
+  "experiments": [
+    {
+      "id": "E-LOS",
+      "slice": "LOS segments",
+      "model": "aggregate",
+      "key_change": "Stratified admissions by LOS bins",
+      "metrics": {
+        "readmit_high": 0.268,
+        "readmit_low": 0.134
+      },
+      "notes": "Risk rises with LOS"
+    },
+    {
+      "id": "E-Cluster",
+      "slice": "LOS>=15 cardio-renal/sepsis",
+      "model": "aggregate",
+      "key_change": "ICD-driven cardio-renal flag",
+      "metrics": {
+        "cardiorenal": 0.257,
+        "non_cardio_long": 0.236
+      },
+      "notes": "+2.1pp uplift"
+    },
+    {
+      "id": "E-Disposition",
+      "slice": "Discharge location",
+      "model": "aggregate",
+      "key_change": "Disposition grouping",
+      "metrics": {
+        "psych_facility": 0.459,
+        "home": 0.156
+      },
+      "notes": "Psych transfers highest risk"
+    },
+    {
+      "id": "E-Followup",
+      "slice": "Follow-up language",
+      "model": "aggregate",
+      "key_change": "Keyword heuristic",
+      "metrics": {
+        "no_followup": 0.187,
+        "with_followup": 0.169
+      },
+      "notes": "Documentation correlates with lower risk"
+    }
+  ],
+  "analysis": {
+    "top_features": [
+      "LOS segment",
+      "cardio-renal/sepsis flags",
+      "discharge disposition",
+      "prior admissions"
+    ],
+    "sanity_checks": [
+      "Compared long LOS clusters vs peers",
+      "Validated readmission gap totals vs 31465 positives",
+      "Confirmed lab coverage counts for LOS>=15d"
+    ]
+  },
+  "artifacts": [
+    {
+      "name": "ehr/cohort_eda.py",
+      "purpose": "Reproduce exploratory tables"
+    },
+    {
+      "name": "data/interim/readmit_analysis/2025-11-01_readmit_los_readmit_rates.csv",
+      "purpose": "LOS stratified rates"
+    },
+    {
+      "name": "documents/reports/readmission-risk-stratification-2025-11-01/results.csv",
+      "purpose": "Daily results snapshot"
+    }
+  ],
+  "impact": {
+    "utility": "Identified priority risk cohorts (cardio-renal, psych discharge, high prior utilization)",
+    "robustness": "Full-cohort aggregations across multiple source tables",
+    "decision_readiness": "Tables ready for feature engineering and intervention design",
+    "risks": [
+      "Social-text heuristics may misclassify",
+      "Medication overlap approximates orders, not administrations"
+    ]
+  },
+  "deviations": [
+    "Skipped plotting due to missing matplotlib"
+  ],
+  "open_questions": [
+    {
+      "question": "Should MAR data refine medication exposure?",
+      "evidence_needed": "Join emar/inputevents prior to discharge"
+    },
+    {
+      "question": "Are transportation/housing keywords precise?",
+      "evidence_needed": "Sample chart review"
+    },
+    {
+      "question": "Normalize prior utilization by observation window?",
+      "evidence_needed": "Anchor-year aware calculation"
+    }
+  ],
+  "next_steps": [
+    {
+      "owner": "codex-agent",
+      "action": "Integrate new features into modeling dataset",
+      "success": ">=90% coverage in engineered feature file"
+    },
+    {
+      "owner": "analytics-team",
+      "action": "Validate psych discharge intervention plan",
+      "success": "Documented triage workflow"
+    },
+    {
+      "owner": "modeling-team",
+      "action": "Prototype dual-branch readmission model",
+      "success": "AUROC lift >=0.02"
+    }
+  ],
+  "reproducibility": {
+    "entry_points": [
+      "ehr/cohort_eda.py"
+    ],
+    "config": {
+      "date_prefix": "2025-11-01",
+      "skip_labs": false,
+      "skip_meds": false
+    },
+    "lineage": "cohort.csv -> ICD/labs/meds joins -> readmit_analysis tables"
+  }
+}
