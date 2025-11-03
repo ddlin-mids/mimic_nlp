@@ -1,0 +1,4 @@
+Experiment ID,Data Slice,Model,Key Change,Metric 1,Metric 2,Notes
+DOC-PlanSuite,Project roadmap,markdown,Authored project_plan master docs,5 files,00-04 sections,"Captured mission, data, modalities, modeling, and execution phases for dual-arm alignment."
+NB-DualArm,EDA parity,notebook,Created 01_dual_arm_cohort_exploration.ipynb mirroring cohort EDA,SKIP flags exposed,ICD/LOS parity checks,Ensures Colab analysts replicate HPC script outputs without divergence.
+REP-Org,Reporting structure,filesystem,Rehomed 2025-11-01 report to dated path per guide,Path format enforced,Manifest updated,Aligns artifact storage with governance requirements.

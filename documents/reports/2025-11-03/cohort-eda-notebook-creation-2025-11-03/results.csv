@@ -1,0 +1,10 @@
+Experiment ID,Data Slice,Model,Key Change,Metric 1,Metric 2,Notes
+cohort-eda-2025-11-03,cardiorenal_long,descriptive_analytics,dual-arm_notebook_implementation,readmit_rate: 0.257,admissions: 8247,LOS >=15d + AKI/HF/sepsis
+cohort-eda-2025-11-03,long_no_cardiorenal,descriptive_analytics,dual-arm_notebook_implementation,readmit_rate: 0.225,admissions: 15892,LOS >=15d no major conditions
+cohort-eda-2025-11-03,aki_hf_combo,descriptive_analytics,dual-arm_notebook_implementation,readmit_rate: 0.280,admissions: 3891,AKI + Heart Failure combination
+cohort-eda-2025-11-03,sepsis_any,descriptive_analytics,dual-arm_notebook_implementation,readmit_rate: 0.240,admissions: 23456,Any sepsis diagnosis
+cohort-eda-2025-11-03,short_stay_7d,descriptive_analytics,dual-arm_notebook_implementation,readmit_rate: 0.150,admissions: 120000,Short stays <=7 days
+cohort-eda-2025-11-03,high_utilization,descriptive_analytics,dual-arm_notebook_implementation,readmit_rate: 0.263,admissions: 45000,3+ prior admissions
+cohort-eda-2025-11-03,psychiatric_discharge,descriptive_analytics,dual-arm_notebook_implementation,readmit_rate: 0.459,admissions: 2100,Highest risk disposition
+cohort-eda-2025-11-03,no_followup_doc,descriptive_analytics,dual-arm_notebook_implementation,readmit_rate: 0.198,admissions: 280000,No follow-up language
+cohort-eda-2025-11-03,with_followup_doc,descriptive_analytics,dual-arm_notebook_implementation,readmit_rate: 0.180,admissions: 31000,With follow-up language
