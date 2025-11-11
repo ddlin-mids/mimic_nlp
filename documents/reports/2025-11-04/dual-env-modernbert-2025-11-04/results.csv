@@ -1,0 +1,4 @@
+Experiment ID,Data Slice,Model,Key Change,Metric 1,Metric 2,Notes
+PLAN-DualExec,Research ops,markdown,Published dual-environment research plan,2 execution tracks,4 coordination rules,Defines HPC vs Colab responsibilities
+TOOL-ModernBERT,Text pipeline,python,Created ehr/encode_notes_modernbert.py CLI,Dry-run flag,Manifest output,Covers discharge+radiology columns
+SLURM-FreeGPU,Job orchestration,sbatch,Added scripts/slurm/encode_notes_modernbert.sbatch,Partition=free-gpu,GPU=A30,Repo-local caches avoid $HOME quota

@@ -9,6 +9,27 @@
   - Domain-adapted adapters for radiology vs discharge contexts to preserve nuanced vocabulary.
   - Prompt-based extractions for social determinants (transport, housing, caregiver support) to complement keyword heuristics.
 
+### ModernBERT Encoding Runbook
+1. **Dry run on CPU node**
+   ```bash
+   UV_CACHE_DIR=.uv-cache uv run python ehr/encode_notes_modernbert.py \
+     --input-path notebooks/notebooks_dc/_data/processed/02_link_notes_to_admissions/labeled_admissions_with_discharge_and_radiology.csv \
+     --output-dir notebooks/notebooks_dc/_data/processed/04B_encode_notes_bioclinical_modernbert/dry_run \
+     --limit 256 --batch-size 2 --device cpu
+   ```
+   Confirms schema + manifest generation before booking GPUs.
+2. **Submit full job on HPC**
+   ```bash
+   sbatch scripts/slurm/encode_notes_modernbert.sbatch
+   ```
+   - Jobs must target the **free-gpu** partition with A30s (request handled inside the script).  
+   - Override defaults via env vars: `MODERNBERT_INPUT_PATH`, `MODERNBERT_OUTPUT_DIR`, `MODERNBERT_BATCH_SIZE`, `MODERNBERT_DTYPE`.
+3. **Outputs**
+   - Embeddings and hadm_id mapping saved under `notebooks/notebooks_dc/_data/processed/04B_encode_notes_bioclinical_modernbert/<run>` as compressed `.npz`.
+   - `manifest.json` captures CLI arguments, device info, and per-column stats for reproducibility.
+4. **Reporting**
+   - Log runtime/resource notes in the day’s `documents/reports/YYYY-MM-DD/modernbert-encoding-*` package.
+
 ## Structured EHR Events
 - **Target Encoder:** HiBEHRT (patient → admission → event hierarchy) with temporal embeddings and max 2 048 events per admission.
 - **Current Status:** Published weights not available; alternatives being investigated:
