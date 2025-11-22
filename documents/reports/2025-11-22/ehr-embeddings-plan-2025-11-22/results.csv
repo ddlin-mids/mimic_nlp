@@ -1,0 +1,4 @@
+experiment_id,data_slice,model,key_change,metric_1,metric_2,notes
+PLAN-EHR-Stage1,all,N/A,Define BoE+SVD static EHR embedding aligned with ModernBERT notes,,,planning-only entry
+PLAN-EHR-Stage2,all,GRU/temporal encoder (planned),Design sequence encoder over day-level EHR features,,,planning-only entry
+

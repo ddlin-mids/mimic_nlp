@@ -1,0 +1,122 @@
+{
+  "date": "2025-11-22",
+  "agents": [
+    "codex-agent"
+  ],
+  "project": "MIMIC-IV 30-Day Readmission / Preliminary EHR Embeddings for Multimodal Fusion",
+  "starting_plan": [
+    "Document a concrete plan for structured EHR embeddings aligned with ModernBERT note embeddings",
+    "Align HPC scripts and Colab notebooks around shared artifacts and paths",
+    "Prioritize a fast Stage 1 EHR baseline so Daniel can start multimodal training"
+  ],
+  "data": {
+    "sources": [
+      "documents/project_plan/02_modalities_and_embeddings.md",
+      "documents/research_plan_readmission_models.md",
+      "notebooks/notebooks_dc/02B_link_notes_to_admissions.ipynb",
+      "notebooks/notebooks_dc/04B_encode_notes_bioclinical_modernbert.ipynb",
+      "notebooks/notebooks_dc/06_encode_temporal_events.ipynb",
+      "notebooks/notebooks_dc/07_multimodal_fusion.ipynb",
+      "ehr/preprocess_ehr.py",
+      "data/data_utils/*",
+      "refs/readmit-stgnn/*"
+    ],
+    "rows_after_filters": null,
+    "transforms": [
+      "Planned aggregation of day-level ICD/med/lab features into admission-level EHR vectors",
+      "Planned dimensionality reduction (TruncatedSVD) for static EHR embeddings",
+      "Planned GRU-based sequence encoder over day-level structured EHR features"
+    ],
+    "quality": {
+      "missing_pct": null,
+      "label_balance": {
+        "pos": null,
+        "neg": null
+      }
+    }
+  },
+  "experiments": [
+    {
+      "id": "PLAN-EHR-Stage1",
+      "slice": "all admissions",
+      "model": "N/A (design)",
+      "key_change": "Define BoE+SVD static EHR embedding aligned with ModernBERT notes",
+      "metrics": {},
+      "notes": "Uses outputs from ehr/preprocess_ehr.py to create admission-level structured embeddings."
+    },
+    {
+      "id": "PLAN-EHR-Stage2",
+      "slice": "all admissions",
+      "model": "GRU/temporal encoder (planned)",
+      "key_change": "Design sequence encoder over ehr_preprocessed_seq_by_day_cat_embedding.pkl",
+      "metrics": {},
+      "notes": "Captures daily EHR trajectories without introducing DGL/graph dependencies."
+    }
+  ],
+  "analysis": {
+    "top_features": [],
+    "sanity_checks": [
+      "Confirmed existing STGNN-style EHR preprocessing can be reused for both static and sequence embeddings",
+      "Verified ModernBERT note embeddings and Daniel's BoE event embeddings have compatible hadm_id alignment via mapping files"
+    ]
+  },
+  "artifacts": [
+    {
+      "name": "documents/reports/2025-11-22/ehr-embeddings-plan-2025-11-22/report.md",
+      "purpose": "Daily report capturing EHR embedding plan"
+    }
+  ],
+  "impact": {
+    "utility": "Establishes a clear, actionable plan for delivering preliminary structured EHR embeddings to unblock multimodal training.",
+    "robustness": "Builds on existing, tested preprocessing code and deterministic dimensionality reduction methods.",
+    "decision_readiness": "Ready to implement Stage 1 embeddings and hand them to Daniel for fusion experiments.",
+    "risks": [
+      "Aggregation choices for daily EHR features may affect downstream performance and need empirical validation.",
+      "Sequence encoder design space is still open and may require iteration."
+    ]
+  },
+  "deviations": [],
+  "open_questions": [
+    {
+      "question": "What is the best way to aggregate daily ICD/med/lab features into a single admission-level vector?",
+      "evidence_needed": "Compare a few aggregation schemes on a validation set once embeddings are implemented."
+    },
+    {
+      "question": "What target dimensionality and normalization should we use for static EHR embeddings?",
+      "evidence_needed": "Inspect explained variance from SVD and downstream performance in Daniel's fusion models."
+    },
+    {
+      "question": "Should the sequence encoder be a simple GRU or a transformer-style model for day-level EHR features?",
+      "evidence_needed": "Prototype both on a subset and compare AUROC/AUPRC and training stability."
+    }
+  ],
+  "next_steps": [
+    {
+      "owner": "codex-agent/ddlin",
+      "action": "Run ehr/preprocess_ehr.py on the current cohort and save outputs under data/interim/ehr/",
+      "success": "EHR preprocessed CSV and pickle files available and documented."
+    },
+    {
+      "owner": "codex-agent/ddlin",
+      "action": "Implement Stage 1 static EHR embedding generator (BoE+SVD) and share embeddings with Daniel",
+      "success": "Daniel can load EHR embeddings alongside ModernBERT note embeddings in his multimodal fusion notebook."
+    },
+    {
+      "owner": "codex-agent/ddlin",
+      "action": "Prototype GRU-based sequence encoder over ehr_preprocessed_seq_by_day_cat_embedding.pkl",
+      "success": "CLI exists with a small-scale smoke test and clear I/O schema."
+    }
+  ],
+  "reproducibility": {
+    "entry_points": [
+      "ehr/get_mimic_cohort.py",
+      "ehr/preprocess_ehr.py"
+    ],
+    "config": {
+      "seed": 42,
+      "data_alias": "readmit_cohort_v1"
+    },
+    "lineage": "MIMIC-IV raw tables \u2192 scripted cohort \u2192 STGNN-style EHR preprocessing \u2192 planned static and sequence EHR embeddings \u2192 multimodal fusion notebooks"
+  }
+}
+
