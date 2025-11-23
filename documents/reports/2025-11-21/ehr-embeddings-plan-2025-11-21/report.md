@@ -10,7 +10,7 @@
   - Prioritize a fast, reliable Stage 1 EHR baseline so Daniel can start multimodal training.
 - **Context Sources Used:** chat thread; `documents/report_guide/report_guide.md`; `documents/project_plan/02_modalities_and_embeddings.md`; `documents/research_plan_readmission_models.md`; `notebooks/notebooks_dc/02B_link_notes_to_admissions.ipynb`; `notebooks/notebooks_dc/04B_encode_notes_bioclinical_modernbert.ipynb`; `notebooks/notebooks_dc/06_encode_temporal_events.ipynb`; `notebooks/notebooks_dc/07_multimodal_fusion.ipynb`; `ehr/preprocess_ehr.py`; `data/data_utils/*`; `refs/readmit-stgnn/*`.
 
-## 2) What Was Done (Planning & Design)
+## 2) What Was Done (Planning, Design & Cohort Alignment)
 
 - **Clarified environment split:**
   - `notebook_dl` + `ehr` + `scripts/slurm` are the HPC-facing, `uv`-managed path for full-cohort runs (ModernBERT encoding, future structured encoders).
@@ -28,6 +28,15 @@
 - **Framed near-term EHR embedding strategy:**
   - **Stage 1:** fast, static admission-level EHR embeddings using existing day-level features and SVD, designed to be easy to fuse with ModernBERT note embeddings and Daniel's Notebook 7 pipeline.
   - **Stage 2:** sequence-aware EHR embeddings that respect day-level trajectories via a lightweight GRU or temporal encoder (without requiring DGL), building on the same STGNN-style feature engineering.
+
+- **Aligned long-stay cohort definition (LOS ≥ 15):**
+  - Updated `ehr/cohort_eda.py` to make `data/interim/readmit_analysis/long_los_cohort.csv` the canonical long-stay cohort with `length_of_stay_days >= 15`, matching the existing `cardiorenal_sepsis_long` semantics and partner documentation.
+  - On first run after the change, preserved the legacy LOS ≥ 14 cohort as `data/interim/readmit_analysis/long_los_cohort_los14.csv` for reference and comparison.
+  - Regenerated cohorts and confirmed:
+    - Legacy LOS ≥ 14 (`long_los_cohort_los14.csv`): 17,940 admissions, 10,204 `is_cardiorenal_long` (56.9%); overall readmission rate 24.49%.
+    - Canonical LOS ≥ 15 (`long_los_cohort.csv`): 15,659 admissions, 10,204 `is_cardiorenal_long` (65.2%); overall readmission rate 24.94%.
+    - Within the cardiorenal-long subset, readmission rate remains stable at 25.66% in both cohorts; the change mainly removes shorter, non-cardiorenal long stays from the denominator.
+
 
 ## 3) Results Snapshot (Plan Artifacts)
 

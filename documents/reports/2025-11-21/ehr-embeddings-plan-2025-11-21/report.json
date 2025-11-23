@@ -25,7 +25,8 @@
     "transforms": [
       "Planned aggregation of day-level ICD/med/lab features into admission-level EHR vectors",
       "Planned dimensionality reduction (TruncatedSVD) for static EHR embeddings",
-      "Planned GRU-based sequence encoder over day-level structured EHR features"
+      "Planned GRU-based sequence encoder over day-level structured EHR features",
+      "Aligned long-stay cohort to LOS>=15 in ehr/cohort_eda.py and preserved LOS>=14 legacy cohort as long_los_cohort_los14.csv"
     ],
     "quality": {
       "missing_pct": null,
@@ -51,6 +52,23 @@
       "key_change": "Design sequence encoder over ehr_preprocessed_seq_by_day_cat_embedding.pkl",
       "metrics": {},
       "notes": "Captures daily EHR trajectories without introducing DGL/graph dependencies."
+    },
+    {
+      "id": "COHORT-LOS15",
+      "slice": "long-stay admissions",
+      "model": "aggregate",
+      "key_change": "Switched canonical long_los_cohort to LOS>=15 while preserving legacy LOS>=14 snapshot",
+      "metrics": {
+        "legacy_total": 17940,
+        "legacy_cardiorenal_long": 10204,
+        "legacy_cardiorenal_long_pct": 56.9,
+        "legacy_readmit_rate_pct": 24.49,
+        "los15_total": 15659,
+        "los15_cardiorenal_long": 10204,
+        "los15_cardiorenal_long_pct": 65.2,
+        "los15_readmit_rate_pct": 24.94
+      },
+      "notes": "Cardiorenal-long subset unchanged; overall long-stay readmit rate slightly higher due to removing LOS\u224814 non-cardiorenal stays."
     }
   ],
   "analysis": {
@@ -119,4 +137,3 @@
     "lineage": "MIMIC-IV raw tables \u2192 scripted cohort \u2192 STGNN-style EHR preprocessing \u2192 planned static and sequence EHR embeddings \u2192 multimodal fusion notebooks"
   }
 }
-

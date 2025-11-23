@@ -106,6 +106,68 @@ def _apply_condition_flags(cohort: pd.DataFrame) -> pd.DataFrame:
     return cohort
 
 
+def save_long_los_cohort(cohort: pd.DataFrame) -> None:
+    """
+    Save the long-stay cohort with cardio-renal/sepsis flags for downstream work.
+
+    Semantics for data/interim/readmit_analysis/long_los_cohort.csv:
+    - Filter admissions with length_of_stay_days >= 15 days (canonical "long-stay").
+    - Attach ICD-derived condition flags from _apply_condition_flags.
+    - Define is_cardiorenal_long using the existing cardiorenal_sepsis_long flag
+      (LOS >= 15 and any cardio-renal/sepsis diagnosis).
+
+    For transition, if an existing long_los_cohort.csv is present when this
+    function is first run, it is copied to long_los_cohort_los14.csv so the
+    original LOS>=14 partner cohort remains available for reference.
+    """
+
+    ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
+
+    original_path = ANALYSIS_DIR / "long_los_cohort.csv"
+    legacy_path = ANALYSIS_DIR / "long_los_cohort_los14.csv"
+
+    # Preserve the legacy LOS>=14 cohort once for reference if it exists.
+    if original_path.exists() and not legacy_path.exists():
+        legacy_df = pd.read_csv(original_path)
+        legacy_df.to_csv(legacy_path, index=False)
+
+    # Canonical long-stay cohort: LOS >= 15 days.
+    long_mask = cohort["length_of_stay_days"] >= 15
+    long_cohort = cohort.loc[long_mask].copy()
+    long_cohort["is_cardiorenal_long"] = long_cohort["cardiorenal_sepsis_long"].fillna(False)
+
+    cols = [
+        "subject_id",
+        "hadm_id",
+        "admittime",
+        "dischtime",
+        "length_of_stay_days",
+        "readmitted_within_window",
+        "readmission_gap_in_days",
+        "admission_type",
+        "discharge_location",
+        "age_at_admit",
+        "gender",
+        "race",
+        "is_cardiorenal_long",
+        "has_acute_kidney_injury",
+        "has_heart_failure",
+        "has_hyponatremia",
+        "has_posthemorrhagic_anemia",
+        "has_sepsis",
+        "has_any_cardiorenal_sepsis",
+        "has_aki_and_hf",
+    ]
+
+    missing = [c for c in cols if c not in long_cohort.columns]
+    if missing:
+        raise KeyError(f"Missing expected columns for long_los_cohort: {missing}")
+
+    out = long_cohort[cols].sort_values(["subject_id", "hadm_id"])
+    output_path = ANALYSIS_DIR / "long_los_cohort.csv"
+    out.to_csv(output_path, index=False)
+
+
 def save_los_and_cluster_tables(cohort: pd.DataFrame) -> None:
     los_summary = (
         cohort.groupby("los_segment")
@@ -537,6 +599,9 @@ def main() -> None:
     _ensure_inputs()
     cohort = _load_cohort()
     cohort = _apply_condition_flags(cohort)
+
+    # Long-stay cohort for downstream text/EHR pipelines.
+    save_long_los_cohort(cohort)
 
     save_los_and_cluster_tables(cohort)
     save_discharge_disposition_tables(cohort)

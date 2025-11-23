@@ -5,6 +5,7 @@ import pickle
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Dict, Iterable, Optional, Set
 
 import numpy as np
 import pandas as pd
@@ -47,6 +48,120 @@ SUBGOUPRS_EXCLUDED = [
     "Z69-Z76",
     "Z77-Z99",
 ]
+
+ICD_MAP_PATH = REPO_ROOT / "refs/readmit-stgnn/data/ICD10_Groups.csv"
+NDC_MAP_PATH = REPO_ROOT / "refs/readmit-stgnn/data/ndc2therapeutic.csv"
+
+
+def load_cohort(path: str) -> pd.DataFrame:
+    """Load cohort CSV with expected date parsing."""
+    return pd.read_csv(path, parse_dates=["admittime", "dischtime"])
+
+
+def preprocess_icd(path: str, df_demo: pd.DataFrame) -> pd.DataFrame:
+    """
+    Load ICD diagnoses for the cohort admissions.
+    Minimal mapping: strip dots, uppercase, and take 3-char prefix as SUBGROUP.
+    """
+    hadm_set = set(df_demo["hadm_id"])
+    frames = []
+    for chunk in pd.read_csv(path, chunksize=500_000, usecols=["hadm_id", "icd_code"]):
+        chunk = chunk[chunk["hadm_id"].isin(hadm_set)]
+        if chunk.empty:
+            continue
+        icd = chunk["icd_code"].astype(str).str.upper().str.replace(".", "", regex=False)
+        chunk = chunk.assign(SUBGROUP=icd.str[:3])
+        frames.append(chunk[["hadm_id", "SUBGROUP"]])
+    if not frames:
+        return pd.DataFrame(columns=["hadm_id", "SUBGROUP"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def preprocess_lab(path: str, df_demo: pd.DataFrame) -> pd.DataFrame:
+    """
+    Load labs for the cohort admissions and derive Day_Number.
+    label_fluid is set to the itemid string; flag is passed through.
+    """
+    hadm_set = set(df_demo["hadm_id"])
+    adm_map = df_demo.set_index("hadm_id")["admittime"].to_dict()
+    dis_map = df_demo.set_index("hadm_id")["dischtime"].to_dict()
+    los_map = df_demo.set_index("hadm_id")["length_of_stay_days"].to_dict()
+
+    frames = []
+    for chunk in pd.read_csv(
+        path,
+        chunksize=1_000_000,
+        usecols=["hadm_id", "itemid", "charttime", "flag"],
+        dtype={"flag": str},
+    ):
+        chunk = chunk[chunk["hadm_id"].isin(hadm_set)]
+        if chunk.empty:
+            continue
+        chunk["charttime"] = pd.to_datetime(chunk["charttime"], errors="coerce")
+        chunk["admittime"] = chunk["hadm_id"].map(adm_map)
+        chunk["dischtime"] = chunk["hadm_id"].map(dis_map)
+        chunk = chunk.dropna(subset=["charttime", "admittime"])
+        chunk["day_num"] = (chunk["charttime"].dt.floor("D") - chunk["admittime"].dt.floor("D")).dt.days + 1
+        # keep within LOS window
+        chunk["los"] = chunk["hadm_id"].map(los_map)
+        chunk = chunk[(chunk["day_num"] >= 1) & (chunk["day_num"] <= chunk["los"])]
+        if chunk.empty:
+            continue
+        chunk = chunk.assign(
+            label_fluid=chunk["itemid"].astype(str),
+            flag=chunk["flag"].fillna("nan"),
+            Day_Number=chunk["day_num"].astype(float),
+        )
+        frames.append(chunk[["hadm_id", "label_fluid", "flag", "Day_Number"]])
+    if not frames:
+        return pd.DataFrame(columns=["hadm_id", "label_fluid", "flag", "Day_Number"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def preprocess_med(path: str, df_demo: pd.DataFrame) -> pd.DataFrame:
+    """
+    Load meds for the cohort admissions and derive Day_Number + therapeutic class.
+    """
+    hadm_set = set(df_demo["hadm_id"])
+    adm_map = df_demo.set_index("hadm_id")["admittime"].to_dict()
+    dis_map = df_demo.set_index("hadm_id")["dischtime"].to_dict()
+    los_map = df_demo.set_index("hadm_id")["length_of_stay_days"].to_dict()
+
+    # load ndc -> therapeutic class map if available
+    ndc_map = {}
+    if NDC_MAP_PATH.exists():
+        ndc_df = pd.read_csv(NDC_MAP_PATH)
+        ndc_map = dict(zip(ndc_df["NDC_MEDICATION_CODE"].astype(str), ndc_df["MED_THERAPEUTIC_CLASS_DESCRIPTION"]))
+
+    frames = []
+    usecols = ["hadm_id", "ndc", "drug", "starttime", "stoptime"]
+    for chunk in pd.read_csv(path, chunksize=500_000, usecols=usecols):
+        chunk = chunk[chunk["hadm_id"].isin(hadm_set)]
+        if chunk.empty:
+            continue
+        chunk["starttime"] = pd.to_datetime(chunk["starttime"], errors="coerce")
+        chunk["admittime"] = chunk["hadm_id"].map(adm_map)
+        chunk["dischtime"] = chunk["hadm_id"].map(dis_map)
+        chunk = chunk.dropna(subset=["admittime"])
+        # compute day number from starttime (fallback to admittime if missing)
+        start = chunk["starttime"].fillna(chunk["admittime"])
+        chunk["day_num"] = (start.dt.floor("D") - chunk["admittime"].dt.floor("D")).dt.days + 1
+        chunk["los"] = chunk["hadm_id"].map(los_map)
+        chunk = chunk[(chunk["day_num"] >= 1) & (chunk["day_num"] <= chunk["los"])]
+        if chunk.empty:
+            continue
+        # map ndc to therapeutic class; fallback to drug name
+        chunk["ndc_str"] = chunk["ndc"].astype(str)
+        chunk["MED_THERAPEUTIC_CLASS_DESCRIPTION"] = chunk["ndc_str"].map(ndc_map)
+        chunk["MED_THERAPEUTIC_CLASS_DESCRIPTION"] = chunk["MED_THERAPEUTIC_CLASS_DESCRIPTION"].fillna(
+            chunk["drug"].astype(str).str.upper()
+        )
+        chunk = chunk.assign(Day_Number=chunk["day_num"].astype(float))
+        frames.append(chunk[["hadm_id", "MED_THERAPEUTIC_CLASS_DESCRIPTION", "Day_Number"]])
+
+    if not frames:
+        return pd.DataFrame(columns=["hadm_id", "MED_THERAPEUTIC_CLASS_DESCRIPTION", "Day_Number"])
+    return pd.concat(frames, ignore_index=True)
 
 
 def ehr_bag_of_words_mimic(
@@ -380,7 +495,6 @@ def ehr2sequence(preproc_dict, df_demo, by="day"):
     """
     Arrange EHR into sequences for temporal models
     """
-
     X = preproc_dict["X"]
     df = copy.deepcopy(X)
     feature_cols = preproc_dict["feature_cols"]
@@ -397,33 +511,24 @@ def ehr2sequence(preproc_dict, df_demo, by="day"):
         )
         X_dict[key] = X[i]
 
-    _, node_included_files, _, _, _, _ = get_readmission_label_mimic(
-        df_demo, max_seq_len=None
-    )
+    # Build node_name -> list of day indices using admittime/dischtime rather than imaging metadata
+    node_included_files = {}
+    for _, row in tqdm(df_demo.iterrows(), total=len(df_demo)):
+        node_name = f"{row['subject_id']}_{row['hadm_id']}"
+        if node_name in node_included_files:
+            continue
+        adm = pd.to_datetime(row["admittime"]).date()
+        dis = pd.to_datetime(row["dischtime"]).date()
+        days = pd.date_range(start=adm, end=dis)
+        node_included_files[node_name] = [d.date() for d in days]
 
-    # arrange X by day or by cxr
+    # arrange X by day
     feat_dict = {}
-    for node_name, _ in tqdm(node_included_files.items()):
-        # print(node_name)
-        ehr_row = df[df["node_name"] == node_name]
-        curr_admit = ehr_row["admittime"].values[0]
-        curr_discharge = ehr_row["dischtime"].values[0]
-        curr_pat = ehr_row["subject_id"].values[0]
-
-        if by == "day":
-            dt_range = pd.date_range(
-                start=pd.to_datetime(curr_admit).date(),
-                end=pd.to_datetime(curr_discharge).date(),
-            )
-        else:
-            raise NotImplementedError
-
+    for node_name, days in tqdm(node_included_files.items()):
+        subj, hadm = node_name.split("_")
         curr_features = []
-        for dt in dt_range:
-            if by == "cxr":
-                key = str(curr_pat) + "_" + str(dt)
-            else:
-                key = str(curr_pat) + "_" + str(dt.date())
+        for dt in days:
+            key = str(subj) + "_" + str(dt)
             feat = X_dict[key]
             curr_features.append(feat)
 
@@ -443,26 +548,24 @@ def ehr2sequence(preproc_dict, df_demo, by="day"):
         return {"feat_dict": feat_dict, "feature_cols": feature_cols}
 
 
-def main(args):
-    # read csv files
-    df_demo = pd.read_csv(
-        args.demo_file, dtype={k: str for k in CAT_COLUMNS}, low_memory=False
-    )
-    df_lab = pd.read_csv(args.lab_file, dtype={"flag": str}, low_memory=False)
-    df_icd = pd.read_csv(args.icd_file, low_memory=False)
-    df_med = pd.read_csv(args.med_file, low_memory=False)
+def load_cohort(path: str) -> pd.DataFrame:
+    """Load cohort CSV with expected date parsing."""
+    return pd.read_csv(path, parse_dates=["admittime", "dischtime"])
 
+
+def main(args):
+    df_demo = load_cohort(args.demo_file)
+    if "readmitted_within_30days" not in df_demo.columns and "readmitted_within_window" in df_demo.columns:
+        df_demo["readmitted_within_30days"] = df_demo["readmitted_within_window"]
+    if "split" not in df_demo.columns:
+        df_demo["split"] = "train"
+    if "splits" not in df_demo.columns:
+        df_demo["splits"] = df_demo["split"]
     os.makedirs(args.save_dir, exist_ok=True)
 
-    if "readmitted_within_window" in df_demo.columns and "readmitted_within_30days" not in df_demo.columns:
-        df_demo["readmitted_within_30days"] = df_demo["readmitted_within_window"]
-    if "splits" in df_demo.columns and "split" not in df_demo.columns:
-        df_demo = df_demo.rename(columns={"splits": "split"})
-    if "split" in df_demo.columns:
-        df_demo["splits"] = df_demo["split"]
-
-    # # TODO, remove this, for debugging only!
-    # df_demo = df_demo.iloc[:1000].copy()
+    df_icd = preprocess_icd(args.icd_file, df_demo)
+    df_lab = preprocess_lab(args.lab_file, df_demo) if not args.skip_labs else None
+    df_med = preprocess_med(args.med_file, df_demo) if not args.skip_meds else None
 
     # icd
     df_icd_count = ehr_bag_of_words_mimic(
@@ -470,21 +573,33 @@ def main(args):
     )
 
     # lab
-    df_lab_onehot = lab_one_hot_mimic(
-        df_demo, df_lab, col_name="label_fluid", time_step_by="day", filter_freq=None
-    )
+    if df_lab is not None:
+        df_lab_onehot = lab_one_hot_mimic(
+            df_demo, df_lab, col_name="label_fluid", time_step_by="day", filter_freq=None
+        )
+    else:
+        df_lab_onehot = None
 
     # medication
-    df_med_count = ehr_bag_of_words_mimic(
-        df_demo,
-        df_med,
-        col_name="MED_THERAPEUTIC_CLASS_DESCRIPTION",
-        time_step_by="day",
-        filter_freq=None,
-    )
+    if df_med is not None:
+        df_med_count = ehr_bag_of_words_mimic(
+            df_demo,
+            df_med,
+            col_name="MED_THERAPEUTIC_CLASS_DESCRIPTION",
+            time_step_by="day",
+            filter_freq=None,
+        )
+    else:
+        df_med_count = None
 
     # combine
-    df_combined = pd.concat([df_icd_count, df_lab_onehot, df_med_count], axis=1)
+    parts = [df_icd_count]
+    if df_lab_onehot is not None:
+        parts.append(df_lab_onehot)
+    if df_med_count is not None:
+        parts.append(df_med_count)
+
+    df_combined = pd.concat(parts, axis=1)
 
     # drop duplicated columns
     df_combined = df_combined.loc[:, ~df_combined.columns.duplicated()]
@@ -503,14 +618,20 @@ def main(args):
         icd_cols = [
             col for col in feature_cols if col in list(set(df_icd["SUBGROUP"].tolist()))
         ]
-        lab_cols = [
-            col for col in feature_cols if any([s for s in LAB_COLS if s in col])
-        ]
-        med_cols = [
-            col
-            for col in feature_cols
-            if col in list(set(df_med["MED_THERAPEUTIC_CLASS_DESCRIPTION"].tolist()))
-        ]
+        lab_cols = (
+            [col for col in feature_cols if any([s for s in LAB_COLS if s in col])]
+            if df_lab is not None
+            else []
+        )
+        med_cols = (
+            [
+                col
+                for col in feature_cols
+                if col in list(set(df_med["MED_THERAPEUTIC_CLASS_DESCRIPTION"].tolist()))
+            ]
+            if df_med is not None
+            else []
+        )
 
         preproc_dict["demo_cols"] = demo_cols
         preproc_dict["icd_cols"] = icd_cols
@@ -573,6 +694,16 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Dir to filtered cohort medication file.",
+    )
+    parser.add_argument(
+        "--skip-labs",
+        action="store_true",
+        help="Skip processing labevents for faster smoke tests.",
+    )
+    parser.add_argument(
+        "--skip-meds",
+        action="store_true",
+        help="Skip processing prescriptions for faster smoke tests.",
     )
     parser.add_argument(
         "--save_dir", type=str, default=None, help="Dir to save preprocessed files."

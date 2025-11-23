@@ -1,7 +1,7 @@
-# End of Day Report — 2025-11-22
+# End of Day Report — 2025-11-21
 
 ## 1) Report Header
-- **Date & Agent:** 2025-11-22 (PT), Claude Code
+- **Date & Agent:** 2025-11-21 (PT), Claude Code
 - **Project/Subtask:** MIMIC-IV 30-Day Readmission / Generate Structured EHR Embeddings for Multimodal Fusion
 - **Starting Plan:** Generate preliminary structured EHR embeddings (tabular features) for Daniel's multimodal training pipeline. Daniel has already encoded discharge notes and radiology reports using BioClinical-ModernBERT. The missing piece is structured EHR data embedding.
 - **Context Sources Used:**
