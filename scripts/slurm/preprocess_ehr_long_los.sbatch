@@ -3,7 +3,7 @@
 # Preprocess structured EHR features for the long-LOS cohort (LOS >= 15).
 # Outputs are written to data/interim/ehr_long_los/.
 #
-# Resources: CPU only, 8 cores, 64G memory. No time limit specified.
+# Resources: CPU only, 16 cores, 128GB memory. No time limit specified.
 #
 # Usage:
 #   sbatch scripts/slurm/preprocess_ehr_long_los.sbatch
@@ -14,12 +14,12 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --output=logs/slurm/preprocess_ehr_long_los_%j.log
 
 set -euo pipefail
 
-cd "$(dirname "$0")/../.."
+cd "$SLURM_SUBMIT_DIR"
 
 echo "Starting EHR preprocessing for long-LOS cohort (LOS >= 15)..."
 echo "Working dir: $(pwd)"
