@@ -108,18 +108,19 @@ def _apply_condition_flags(cohort: pd.DataFrame) -> pd.DataFrame:
 
 def save_long_los_cohort(cohort: pd.DataFrame) -> None:
     """
-    Save the long-stay cohort with cardio-renal/sepsis flags for downstream work.
+    Save the long-stay cohort with cardio-renal/sepsis flags and robust splits.
 
     Semantics for data/interim/readmit_analysis/long_los_cohort.csv:
     - Filter admissions with length_of_stay_days >= 15 days (canonical "long-stay").
     - Attach ICD-derived condition flags from _apply_condition_flags.
-    - Define is_cardiorenal_long using the existing cardiorenal_sepsis_long flag
-      (LOS >= 15 and any cardio-renal/sepsis diagnosis).
-
-    For transition, if an existing long_los_cohort.csv is present when this
-    function is first run, it is copied to long_los_cohort_los14.csv so the
-    original LOS>=14 partner cohort remains available for reference.
+    - Define is_cardiorenal_long using the existing cardiorenal_sepsis_long flag.
+    - Generate PATIENT-LEVEL Train/Val/Test splits (80/10/10) stratified by:
+      1. Readmission Label (Ever readmitted?)
+      2. Cardiorenal Status (Ever cardiorenal?)
+      3. Gender
+      4. Age (Median split)
     """
+    from sklearn.model_selection import train_test_split
 
     ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -135,6 +136,72 @@ def save_long_los_cohort(cohort: pd.DataFrame) -> None:
     long_mask = cohort["length_of_stay_days"] >= 15
     long_cohort = cohort.loc[long_mask].copy()
     long_cohort["is_cardiorenal_long"] = long_cohort["cardiorenal_sepsis_long"].fillna(False)
+
+    # --- Robust Splitting Logic ---
+    if "split" in long_cohort.columns:
+        long_cohort.drop(columns=["split"], inplace=True)
+
+    print("Generating robust patient-level splits (80/10/10)...")
+    
+    # 1. Aggregate to Patient Level
+    # We define a patient's "phenotype" for stratification based on their history
+    # For age, we take the age at their *first* admission in this cohort to bin them
+    patient_level = long_cohort.sort_values("admittime").groupby("subject_id").agg(
+        has_readmit=("readmitted_within_window", "max"),
+        is_cardiorenal=("is_cardiorenal_long", "max"),
+        gender=("gender", "first"),
+        age=("age_at_admit", "first")
+    ).reset_index()
+
+    # Bin Age (Median Split)
+    patient_level["age_bin"] = pd.qcut(patient_level["age"], q=2, labels=["Younger", "Older"])
+
+    # 2. Create Composite Stratification Key
+    # "1_0_F_Older"
+    patient_level["strat_key"] = (
+        patient_level["has_readmit"].astype(int).astype(str) + "_" +
+        patient_level["is_cardiorenal"].astype(int).astype(str) + "_" +
+        patient_level["gender"].astype(str) + "_" +
+        patient_level["age_bin"].astype(str)
+    )
+    
+    subjects = patient_level["subject_id"].values
+    strat_labels = patient_level["strat_key"].values
+
+    print(f"Stratifying on {patient_level['strat_key'].nunique()} unique patient subgroups.")
+
+    # 3. Split: Train (80%) vs Temp (20%)
+    train_subjs, temp_subjs, _, temp_labels = train_test_split(
+        subjects, strat_labels,
+        test_size=0.20,
+        stratify=strat_labels,
+        random_state=42
+    )
+
+    # 4. Split: Temp (20%) -> Val (10%) + Test (10%)
+    val_subjs, test_subjs = train_test_split(
+        temp_subjs,
+        test_size=0.50,
+        stratify=temp_labels,
+        random_state=42
+    )
+
+    # 5. Map back to admissions
+    split_map = {}
+    for s in train_subjs: split_map[s] = "train"
+    for s in val_subjs: split_map[s] = "val"
+    for s in test_subjs: split_map[s] = "test"
+
+    long_cohort["split"] = long_cohort["subject_id"].map(split_map)
+    
+    # Verification
+    print("\n--- Split Verification ---")
+    print("Admission Counts:")
+    print(long_cohort["split"].value_counts())
+    print("\nAdmission Proportions:")
+    print(long_cohort["split"].value_counts(normalize=True))
+    print("\nReadmission Rate by Split:")
+    print(long_cohort.groupby("split")["readmitted_within_window"].mean())
 
     cols = [
         "subject_id",
@@ -157,6 +224,7 @@ def save_long_los_cohort(cohort: pd.DataFrame) -> None:
         "has_sepsis",
         "has_any_cardiorenal_sepsis",
         "has_aki_and_hf",
+        "split",  # Included now
     ]
 
     missing = [c for c in cols if c not in long_cohort.columns]
@@ -166,6 +234,7 @@ def save_long_los_cohort(cohort: pd.DataFrame) -> None:
     out = long_cohort[cols].sort_values(["subject_id", "hadm_id"])
     output_path = ANALYSIS_DIR / "long_los_cohort.csv"
     out.to_csv(output_path, index=False)
+    print(f"\nSaved cohort with splits to {output_path}")
 
 
 def save_los_and_cluster_tables(cohort: pd.DataFrame) -> None:

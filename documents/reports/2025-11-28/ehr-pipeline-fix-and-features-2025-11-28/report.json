@@ -1,0 +1,116 @@
+{
+  "date": "2025-11-28",
+  "agents": ["Claude Code", "Gemini CLI"],
+  "project": "MIMIC-IV Readmission / EHR Embedding",
+  "starting_plan": [
+    "Fix OOM error in EHR preprocessing",
+    "Verify note coverage",
+    "Implement robust patient-level splitting",
+    "Regenerate cohort and artifacts"
+  ],
+  "data": {
+    "sources": ["MIMIC-IV (hosp/admissions, diagnoses, labs, meds)", "MIMIC-IV-Note"],
+    "rows_after_filters": 15659,
+    "transforms": [
+      "Patient-level stratified splitting (80/10/10)",
+      "Composite stratification key (Readmit_Cardiorenal_Gender_Age)"
+    ],
+    "quality": {
+      "missing_pct": "0% (Discharge Notes)",
+      "label_balance": {
+        "train": "24.9%",
+        "val": "25.6%",
+        "test": "24.6%"
+      }
+    }
+  },
+  "experiments": [
+    {
+      "id": "Job-46743735",
+      "slice": "Long-LOS (Split)",
+      "model": "Preprocessing Pipeline",
+      "key_change": "Patient-Level Split + Full Artifact Gen",
+      "metrics": {
+        "status": "Failed (OOM)"
+      },
+      "notes": "Crashed during cat_embedding generation (fillna on 6k cols)."
+    },
+    {
+      "id": "Job-Pending",
+      "slice": "Long-LOS (Split)",
+      "model": "Preprocessing Pipeline (Memory Optimized)",
+      "key_change": "Chunked FillNA + No Copy + Resume from CSV",
+      "metrics": {
+        "status": "Pending"
+      },
+      "notes": "Optimized to run within 128GB RAM. Skips raw processing if combined CSV exists."
+    }
+  ],
+  "analysis": {
+    "top_features": [
+      "is_cardiorenal_long",
+      "readmitted_within_window"
+    ],
+    "sanity_checks": [
+      "Zero leakage: Patients strictly disjoint across splits",
+      "Covariate balance: Age/Gender/Phenotype matched across splits"
+    ],
+    "stratification_stats": {
+       "train": {"N": 12522, "readmit": "24.9%", "cardiorenal": "65.2%", "female": "45.0%", "age_median": 63.0},
+       "val": {"N": 1568, "readmit": "25.6%", "cardiorenal": "64.2%", "female": "45.3%", "age_median": 64.0},
+       "test": {"N": 1569, "readmit": "24.6%", "cardiorenal": "65.8%", "female": "44.8%", "age_median": 64.0}
+    }
+  },
+  "artifacts": [
+    {
+      "name": "data/interim/readmit_analysis/long_los_cohort.csv",
+      "purpose": "Canonical cohort file with 'split' column"
+    },
+    {
+      "name": "ehr/cohort_eda.py",
+      "purpose": "Updated script with robust splitting logic"
+    },
+    {
+      "name": "ehr/preprocess_ehr.py",
+      "purpose": "Updated script to preserve cohort-specific features in embeddings"
+    }
+  ],
+  "impact": {
+    "utility": "Guarantees valid generalization metrics for all downstream models",
+    "robustness": "Eliminates patient-identity leakage risk",
+    "decision_readiness": "High - Splits are frozen and reproducible"
+  },
+  "deviations": [
+    "Required full re-run of preprocessing instead of partial fix due to upstream split changes",
+    "Implemented chunked fillna and reduced DataFrame copies to fix OOM error (128GB limit exceeded)"
+  ],
+  "open_questions": [
+    {
+      "question": "Optimal embedding dimension?",
+      "evidence_needed": "Validation AUROC comparison"
+    }
+  ],
+  "next_steps": [
+    {
+      "owner": "Claude Code",
+      "action": "Submit training job (GRU)",
+      "success": "ehr_embeddings.npz created"
+    },
+    {
+      "owner": "Claude Code",
+      "action": "Generate Baseline Embeddings",
+      "success": "SVD embeddings created"
+    }
+  ],
+  "reproducibility": {
+    "entry_points": [
+      "ehr/cohort_eda.py",
+      "scripts/slurm/preprocess_ehr_long_los.sbatch"
+    ],
+    "config": {
+      "chunk_size": 2000,
+      "split_seed": 42
+    },
+    "lineage": "MIMIC-IV -> Cohort Split -> Preprocess -> Sequence Pickle"
+  }
+}

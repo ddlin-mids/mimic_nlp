@@ -444,7 +444,11 @@ def preproc_ehr_cat_embedding(X: pd.DataFrame) -> Dict[str, Any]:
     # Vectorized FillNA for numerical columns (counts)
     # For ICD/Meds counts, missing means 0.
     if num_cols:
-        X[num_cols] = X[num_cols].fillna(0)
+        # Process in chunks to avoid OOM
+        chunk_size = 50
+        for i in range(0, len(num_cols), chunk_size):
+            c_cols = num_cols[i : i + chunk_size]
+            X[c_cols] = X[c_cols].fillna(0)
 
     feature_cols = [col for col in X.columns if (col != target) and (col not in COLS_IRRELEVANT)]
     cat_idxs = [i for i, f in enumerate(feature_cols) if f in cols_to_encode]
@@ -706,11 +710,25 @@ def main(args: argparse.Namespace):
     
     # Add new features to global DEMO_COLS so they are preserved
     global DEMO_COLS
+    
+    # 1. History features (calculated above)
     new_features = ["num_prior_admissions", "num_prior_30d_readmissions", "days_since_last_discharge"]
+    
+    # 2. Cohort specific features (conditions, admission info)
+    cohort_features = [
+        "admission_type", "discharge_location", 
+        "is_cardiorenal_long", "has_acute_kidney_injury", "has_heart_failure", 
+        "has_hyponatremia", "has_posthemorrhagic_anemia", "has_sepsis", 
+        "has_any_cardiorenal_sepsis", "has_aki_and_hf"
+    ]
+    
     # Only add if not already present to avoid duplicates on re-runs
-    for f in new_features:
-        if f not in DEMO_COLS:
+    for f in new_features + cohort_features:
+        if f in df_demo.columns and f not in DEMO_COLS:
             DEMO_COLS.append(f)
+            # If string/categorical, ensure it's in CAT_COLUMNS for proper encoding
+            if df_demo[f].dtype == object and f not in CAT_COLUMNS:
+                CAT_COLUMNS.append(f)
             
     # Handle target column naming
     if "readmitted_within_30days" not in df_demo.columns and "readmitted_within_window" in df_demo.columns:
@@ -749,63 +767,69 @@ def main(args: argparse.Namespace):
     
     print(f"Global features identified: {len(global_icd_cols)} ICD groups, {len(global_lab_cols)} Labs, {len(global_med_cols)} Med classes.")
 
-    # Processing in chunks
-    chunk_size = args.chunk_size
-    num_chunks = (len(df_demo) + chunk_size - 1) // chunk_size
-    print(f"Processing {len(df_demo)} admissions in {num_chunks} chunks (size={chunk_size})...")
+    combined_csv_path = os.path.join(args.save_dir, "ehr_combined.csv")
+    if os.path.exists(combined_csv_path):
+        print(f"Found existing combined EHR data at {combined_csv_path}. Loading...")
+        df_combined = pd.read_csv(combined_csv_path)
+        print(f"Loaded combined shape: {df_combined.shape}")
+    else:
+        # Processing in chunks
+        chunk_size = args.chunk_size
+        num_chunks = (len(df_demo) + chunk_size - 1) // chunk_size
+        print(f"Processing {len(df_demo)} admissions in {num_chunks} chunks (size={chunk_size})...")
 
-    chunk_files = []
-    
-    for i in tqdm(range(num_chunks), desc="Chunks"):
-        start_idx = i * chunk_size
-        end_idx = min((i + 1) * chunk_size, len(df_demo))
+        chunk_files = []
         
-        chunk_file = os.path.join(temp_chunk_dir, f"chunk_{i}_{start_idx}_{end_idx}.pkl")
-        chunk_files.append(chunk_file)
-        
-        if os.path.exists(chunk_file):
-            print(f"Chunk {i} already exists, skipping...")
-            continue
+        for i in tqdm(range(num_chunks), desc="Chunks"):
+            start_idx = i * chunk_size
+            end_idx = min((i + 1) * chunk_size, len(df_demo))
             
-        print(f"Processing chunk {i} ({start_idx} to {end_idx})...", flush=True)
-        df_chunk = df_demo.iloc[start_idx:end_idx].copy()
-        
-        try:
-            df_chunk_res = process_chunk(
-                i, df_chunk, df_icd, df_lab, df_med, 
-                global_icd_cols, global_lab_cols, global_med_cols, 
-                args
-            )
+            chunk_file = os.path.join(temp_chunk_dir, f"chunk_{i}_{start_idx}_{end_idx}.pkl")
+            chunk_files.append(chunk_file)
             
-            with open(chunk_file, "wb") as f:
-                pickle.dump(df_chunk_res, f)
+            if os.path.exists(chunk_file):
+                print(f"Chunk {i} already exists, skipping...")
+                continue
+                
+            print(f"Processing chunk {i} ({start_idx} to {end_idx})...", flush=True)
+            df_chunk = df_demo.iloc[start_idx:end_idx].copy()
             
-            del df_chunk_res
-            del df_chunk
-            gc.collect()
-            print(f"[Progress] Finished chunk {i+1}/{num_chunks}", flush=True)
-            
-        except Exception as e:
-            print(f"Error processing chunk {i}: {e}", flush=True)
-            raise e
+            try:
+                df_chunk_res = process_chunk(
+                    i, df_chunk, df_icd, df_lab, df_med, 
+                    global_icd_cols, global_lab_cols, global_med_cols, 
+                    args
+                )
+                
+                with open(chunk_file, "wb") as f:
+                    pickle.dump(df_chunk_res, f)
+                
+                del df_chunk_res
+                del df_chunk
+                gc.collect()
+                print(f"[Progress] Finished chunk {i+1}/{num_chunks}", flush=True)
+                
+            except Exception as e:
+                print(f"Error processing chunk {i}: {e}", flush=True)
+                raise e
 
-    print("Aggregating chunks...")
-    all_chunks = []
-    for cf in tqdm(chunk_files, desc="Loading Chunks"):
-        with open(cf, "rb") as f:
-            all_chunks.append(pickle.load(f))
-            
-    df_combined = pd.concat(all_chunks, axis=0, ignore_index=True)
-    del all_chunks
-    gc.collect()
-    
-    print(f"Final combined shape: {df_combined.shape}")
+        print("Aggregating chunks...")
+        all_chunks = []
+        for cf in tqdm(chunk_files, desc="Loading Chunks"):
+            with open(cf, "rb") as f:
+                all_chunks.append(pickle.load(f))
+                
+        df_combined = pd.concat(all_chunks, axis=0, ignore_index=True)
+        del all_chunks
+        gc.collect()
+        
+        print(f"Final combined shape: {df_combined.shape}")
 
-    # drop duplicated columns (again, just in case)
-    df_combined = df_combined.loc[:, ~df_combined.columns.duplicated()]
-    
-    # Save full combined raw CSV
-    df_combined.to_csv(os.path.join(args.save_dir, "ehr_combined.csv"), index=False)
+        # drop duplicated columns (again, just in case)
+        df_combined = df_combined.loc[:, ~df_combined.columns.duplicated()]
+        
+        # Save full combined raw CSV
+        df_combined.to_csv(combined_csv_path, index=False)
 
     formats = []
     if not args.skip_cat_embedding:
@@ -813,12 +837,16 @@ def main(args: argparse.Namespace):
     if not args.skip_one_hot:
         formats.append("one_hot")
 
-    for format in formats:
+    for i, format in enumerate(formats):
         print(f"Generating {format} representation...")
+        # Avoid copy for the last iteration to save memory
+        is_last = (i == len(formats) - 1)
+        df_input = df_combined if is_last else df_combined.copy()
+
         if format == "cat_embedding":
-            preproc_dict = preproc_ehr_cat_embedding(df_combined.copy())
+            preproc_dict = preproc_ehr_cat_embedding(df_input)
         else:
-            preproc_dict = preproc_ehr(df_combined.copy())
+            preproc_dict = preproc_ehr(df_input)
 
         feature_cols = preproc_dict["feature_cols"]
         demo_cols = [
@@ -923,30 +951,18 @@ if __name__ == "__main__":
         help="Path to NDC to therapeutic class mapping file.",
     )
 
-        parser.add_argument(
+    parser.add_argument(
+        "--skip-cat-embedding",
+        action="store_true",
+        help="Skip generating categorical embedding (LabelEncoded) artifacts.",
+    )
+    parser.add_argument(
+        "--skip-one-hot",
+        action="store_true",
+        help="Skip generating one-hot encoded artifacts.",
+    )
 
-            "--skip-cat-embedding",
-
-            action="store_true",
-
-            help="Skip generating categorical embedding (LabelEncoded) artifacts.",
-
-        )
-
-        parser.add_argument(
-
-            "--skip-one-hot",
-
-            action="store_true",
-
-            help="Skip generating one-hot encoded artifacts.",
-
-        )
-
-    
-
-        args = parser.parse_args()
-
-        main(args)
+    args = parser.parse_args()
+    main(args)
 
     
