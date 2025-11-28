@@ -5,7 +5,7 @@ import pickle
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Set
+from typing import Dict, Iterable, Optional, Set, Any, List
 
 import numpy as np
 import pandas as pd
@@ -48,9 +48,6 @@ SUBGOUPRS_EXCLUDED = [
     "Z69-Z76",
     "Z77-Z99",
 ]
-
-ICD_MAP_PATH = REPO_ROOT / "refs/readmit-stgnn/data/ICD10_Groups.csv"
-NDC_MAP_PATH = REPO_ROOT / "refs/readmit-stgnn/data/ndc2therapeutic.csv"
 
 
 def load_cohort(path: str) -> pd.DataFrame:
@@ -130,7 +127,7 @@ def preprocess_lab(path: str, df_demo: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
-def preprocess_med(path: str, df_demo: pd.DataFrame) -> pd.DataFrame:
+def preprocess_med(path: str, df_demo: pd.DataFrame, ndc_map_path: str) -> pd.DataFrame:
     """
     Load meds for the cohort admissions and derive Day_Number + therapeutic class.
     """
@@ -141,8 +138,8 @@ def preprocess_med(path: str, df_demo: pd.DataFrame) -> pd.DataFrame:
 
     # load ndc -> therapeutic class map if available
     ndc_map = {}
-    if NDC_MAP_PATH.exists():
-        ndc_df = pd.read_csv(NDC_MAP_PATH)
+    if os.path.exists(ndc_map_path):
+        ndc_df = pd.read_csv(ndc_map_path)
         ndc_map = dict(zip(ndc_df["NDC_MEDICATION_CODE"].astype(str), ndc_df["MED_THERAPEUTIC_CLASS_DESCRIPTION"]))
 
     frames = []
@@ -177,8 +174,8 @@ def preprocess_med(path: str, df_demo: pd.DataFrame) -> pd.DataFrame:
 
 
 def ehr_bag_of_words_mimic(
-    df_demo, df_ehr, col_name, time_step_by="day", filter_freq=None
-):
+    df_demo: pd.DataFrame, df_ehr: pd.DataFrame, col_name: str, time_step_by: str = "day", filter_freq: Optional[int] = None
+) -> pd.DataFrame:
     """
     Vectorized EHR bag-of-words processing.
 
@@ -298,7 +295,7 @@ def ehr_bag_of_words_mimic(
     return df_counts
 
 
-def lab_one_hot_mimic(df_demo, df_lab, col_name, time_step_by="day", filter_freq=None):
+def lab_one_hot_mimic(df_demo: pd.DataFrame, df_lab: pd.DataFrame, col_name: str, time_step_by: str = "day", filter_freq: Optional[int] = None) -> pd.DataFrame:
     """
     Vectorized lab one-hot encoding with abnormal flag detection.
 
@@ -411,42 +408,47 @@ def lab_one_hot_mimic(df_demo, df_lab, col_name, time_step_by="day", filter_freq
     return df_final
 
 
-def preproc_ehr_cat_embedding(X):
+def preproc_ehr_cat_embedding(X: pd.DataFrame) -> Dict[str, Any]:
 
     train_indices = X[X["split"] == "train"].index
     target = "target"
 
-    types = X.dtypes
-
-    # encode categorical variables
-    categorical_columns = []
-    categorical_dims = {}
-    for col in tqdm(X.columns):
-        if col in COLS_IRRELEVANT:
+    # Identify columns to encode
+    # We encode explicit CAT_COLUMNS or any object/string column that is not metadata
+    cols_to_encode = []
+    for col in X.columns:
+        if col in COLS_IRRELEVANT or col == target:
             continue
-        if col in CAT_COLUMNS:
-            l_enc = LabelEncoder()
-            X[col] = X[col].fillna("VV_likely")
-            X[col] = X[col].replace(
-                {0.23990602999011235: "UNKNOWN"}
-            )  # TODO: confirm if removing this works
-            print(col, X[col].unique())
-            X[col] = l_enc.fit_transform(X[col].values)
-            categorical_columns.append(col)
-            categorical_dims[col] = len(l_enc.classes_)
-        else:
-            print(col)
-            X.fillna(X.loc[train_indices, col].mean(), inplace=True)
+        if col in CAT_COLUMNS or X[col].dtype == object:
+            cols_to_encode.append(col)
+    
+    print(f"Encoding {len(cols_to_encode)} categorical columns...")
+    
+    categorical_dims = {}
+    # Process categorical columns (LabelEncoder)
+    # This loop is necessary as LabelEncoder is per-column
+    for col in tqdm(cols_to_encode, desc="Label Encoding"):
+        l_enc = LabelEncoder()
+        X[col] = X[col].fillna("VV_likely")
+        X[col] = X[col].replace({0.23990602999011235: "UNKNOWN"})
+        # Ensure string type for robust encoding
+        X[col] = l_enc.fit_transform(X[col].astype(str).values)
+        categorical_dims[col] = len(l_enc.classes_)
 
-    feature_cols = [
-        col for col in X.columns if (col != target) and (col not in COLS_IRRELEVANT)
-    ]
-    cat_idxs = [i for i, f in enumerate(feature_cols) if f in categorical_columns]
-    cat_dims = [
-        categorical_dims[f]
-        for i, f in enumerate(feature_cols)
-        if f in categorical_columns
-    ]
+    # Identify numerical columns (everything else)
+    feature_cols = [c for c in X.columns if c not in COLS_IRRELEVANT and c != target]
+    num_cols = [c for c in feature_cols if c not in cols_to_encode]
+    
+    print(f"Filling missing values for {len(num_cols)} numerical columns with 0...")
+    
+    # Vectorized FillNA for numerical columns (counts)
+    # For ICD/Meds counts, missing means 0.
+    if num_cols:
+        X[num_cols] = X[num_cols].fillna(0)
+
+    feature_cols = [col for col in X.columns if (col != target) and (col not in COLS_IRRELEVANT)]
+    cat_idxs = [i for i, f in enumerate(feature_cols) if f in cols_to_encode]
+    cat_dims = [categorical_dims[f] for f in feature_cols if f in cols_to_encode]
 
     return {
         "X": X,
@@ -456,7 +458,7 @@ def preproc_ehr_cat_embedding(X):
     }
 
 
-def preproc_ehr(X):
+def preproc_ehr(X: pd.DataFrame) -> Dict[str, Any]:
     """
     Args:
         X: pandas dataframe
@@ -464,55 +466,67 @@ def preproc_ehr(X):
         X_enc: pandas dataframe, with one-hot encoded columns for categorical variables
     """
     train_indices = X[X["split"] == "train"].index
+    target = "target"
 
-    # encode categorical variables
-    X_enc = []
-    num_cols = 0
-    categorical_columns = []
-    categorical_dims = {}
-    for col in tqdm(X.columns):
-        if col in COLS_IRRELEVANT:
-            X_enc.append(X[col])
-            num_cols += 1
-        elif col in CAT_COLUMNS:
-            print(col, X[col].unique())
-            curr_enc = pd.get_dummies(
-                X[col], prefix=col
-            )  # this will transform into one-hot encoder
-            X_enc.append(curr_enc)
-            num_cols += curr_enc.shape[-1]
-            categorical_columns.append(col)
-            categorical_dims[col] = curr_enc.shape[-1]
+    # Identify types of columns
+    cat_cols = [] # Standard demographics
+    lab_cols = [] # Lab flags ("abnormal", "nan")
+    num_cols = [] # Counts
+    
+    for col in X.columns:
+        if col in COLS_IRRELEVANT or col == target:
+            continue
+        
+        # Check if it's a lab column (heuristically, if it contains "abnormal")
+        # A safer check: check if it's in the object list but NOT in CAT_COLUMNS
+        if col in CAT_COLUMNS:
+            cat_cols.append(col)
+        elif X[col].dtype == object:
+            # Ideally we track lab cols explicitly, but here we infer
+            # If it's an object column not in CAT_COLUMNS (like gender/race), it's likely a lab flag column
+            lab_cols.append(col)
         else:
-            X.fillna(X.loc[train_indices, col].mean(), inplace=True)
-            curr_enc = X[col]
-            X_enc.append(curr_enc)
-            num_cols += 1
+            num_cols.append(col)
 
-    X_enc = pd.concat(X_enc, axis=1)
-    assert num_cols == X_enc.shape[-1]
+    print(f"Encoding: {len(cat_cols)} cat, {len(lab_cols)} labs, {len(num_cols)} numeric...")
+    
+    X_enc_parts = [X[COLS_IRRELEVANT + [target] if target in X.columns else COLS_IRRELEVANT]]
+    
+    # 1. Standard Categoricals (Gender, Race) -> One-Hot (drop_first=True)
+    if cat_cols:
+        X[cat_cols] = X[cat_cols].fillna("UNKNOWN")
+        dummies = pd.get_dummies(X[cat_cols], prefix=cat_cols, drop_first=True)
+        X_enc_parts.append(dummies)
+    
+    # 2. Lab Columns -> Binary (Abnormal=1, else 0)
+    if lab_cols:
+        print("Binarizing lab flags...")
+        # This is a massive vectorized op: (X[lab_cols] == 'abnormal').astype(int)
+        # Note: 'nan' (string) and actual NaN/None will both be False.
+        lab_binary = (X[lab_cols] == 'abnormal').astype(int)
+        # Rename columns to indicate abnormality
+        lab_binary.columns = [f"{c}_abnormal" for c in lab_binary.columns]
+        X_enc_parts.append(lab_binary)
+        
+    # 3. Numerical Columns -> FillNA(0)
+    if num_cols:
+        print("Filling numericals with 0...")
+        X_filled_num = X[num_cols].fillna(0)
+        X_enc_parts.append(X_filled_num)
 
-    feature_cols = [
-        col
-        for col in X_enc.columns
-        if (col != "target") and (col not in COLS_IRRELEVANT)
-    ]
-    cat_idxs = [i for i, f in enumerate(feature_cols) if f in categorical_columns]
-    cat_dims = [
-        categorical_dims[f]
-        for _, f in enumerate(feature_cols)
-        if f in categorical_columns
-    ]
-
+    X_enc = pd.concat(X_enc_parts, axis=1)
+    
+    feature_cols = [col for col in X_enc.columns if (col != "target") and (col not in COLS_IRRELEVANT)]
+    
     return {
         "X": X_enc,
         "feature_cols": feature_cols,
-        "cat_idxs": cat_idxs,
-        "cat_dims": cat_dims,
+        "cat_idxs": [],
+        "cat_dims": [],
     }
 
 
-def ehr2sequence(preproc_dict, df_demo, by="day"):
+def ehr2sequence(preproc_dict: Dict[str, Any], df_demo: pd.DataFrame, by: str = "day") -> Dict[str, Any]:
     """
     Arrange EHR into sequences for temporal models
     """
@@ -569,13 +583,135 @@ def ehr2sequence(preproc_dict, df_demo, by="day"):
         return {"feat_dict": feat_dict, "feature_cols": feature_cols}
 
 
-def load_cohort(path: str) -> pd.DataFrame:
-    """Load cohort CSV with expected date parsing."""
-    return pd.read_csv(path, parse_dates=["admittime", "dischtime"])
+def process_chunk(chunk_id: int, df_chunk: pd.DataFrame, df_icd: Optional[pd.DataFrame], df_lab: Optional[pd.DataFrame], df_med: Optional[pd.DataFrame], global_icd_cols: Set[str], global_lab_cols: Set[str], global_med_cols: Set[str], args: argparse.Namespace) -> pd.DataFrame:
+    """Process a single chunk of admissions."""
+    # Filter EHR data for this chunk
+    chunk_hadms = set(df_chunk["hadm_id"])
+    
+    # ICD
+    df_icd_count = None
+    if df_icd is not None:
+        df_icd_chunk = df_icd[df_icd["hadm_id"].isin(chunk_hadms)].copy()
+        df_icd_count = ehr_bag_of_words_mimic(
+            df_chunk, df_icd_chunk, col_name="SUBGROUP", time_step_by="day", filter_freq=None
+        )
+        # Ensure all global cols exist
+        if global_icd_cols:
+            # Use reindex to add missing columns with 0, keeping existing ones
+            # Note: This preserves index and existing data
+            existing_cols = [c for c in df_icd_count.columns if c in global_icd_cols]
+            missing_cols = [c for c in global_icd_cols if c not in df_icd_count.columns]
+            if missing_cols:
+                df_icd_count[missing_cols] = 0
+    
+    # Lab
+    df_lab_onehot = None
+    if df_lab is not None:
+        df_lab_chunk = df_lab[df_lab["hadm_id"].isin(chunk_hadms)].copy()
+        df_lab_onehot = lab_one_hot_mimic(
+            df_chunk, df_lab_chunk, col_name="label_fluid", time_step_by="day", filter_freq=None
+        )
+        # Ensure all global cols exist
+        if global_lab_cols:
+            missing_cols = [c for c in global_lab_cols if c not in df_lab_onehot.columns]
+            if missing_cols:
+                df_lab_onehot[missing_cols] = "nan"
+        
+    # Med
+    df_med_count = None
+    if df_med is not None:
+        df_med_chunk = df_med[df_med["hadm_id"].isin(chunk_hadms)].copy()
+        df_med_count = ehr_bag_of_words_mimic(
+            df_chunk,
+            df_med_chunk,
+            col_name="MED_THERAPEUTIC_CLASS_DESCRIPTION",
+            time_step_by="day",
+            filter_freq=None,
+        )
+        # Ensure all global cols exist
+        if global_med_cols:
+            missing_cols = [c for c in global_med_cols if c not in df_med_count.columns]
+            if missing_cols:
+                df_med_count[missing_cols] = 0
+        
+    # Combine
+    parts = []
+    if df_icd_count is not None: parts.append(df_icd_count)
+    if df_lab_onehot is not None: parts.append(df_lab_onehot)
+    if df_med_count is not None: parts.append(df_med_count)
+        
+    if not parts:
+        return df_chunk # Should not happen normally
+        
+    df_chunk_combined = pd.concat(parts, axis=1)
+    df_chunk_combined = df_chunk_combined.loc[:, ~df_chunk_combined.columns.duplicated()]
+    
+    return df_chunk_combined
 
+def augment_cohort_with_history(cohort: pd.DataFrame, admissions_path: str) -> pd.DataFrame:
+    """
+    Calculates prior admission history features:
+    1. num_prior_admissions: Total previous admissions
+    2. num_prior_30d_readmissions: Number of times readmitted within 30 days previously
+    3. days_since_last_discharge: Gap since previous discharge
+    """
+    print(f"Loading admissions from {admissions_path}...")
+    # We only need columns to calculate timing
+    cols = ["subject_id", "hadm_id", "admittime", "dischtime"]
+    all_adm = pd.read_csv(admissions_path, usecols=cols, parse_dates=["admittime", "dischtime"])
+    
+    # Filter to subjects in our cohort to save memory
+    cohort_subjects = set(cohort["subject_id"].unique())
+    all_adm = all_adm[all_adm["subject_id"].isin(cohort_subjects)].copy()
+    
+    # Sort by subject and time
+    all_adm = all_adm.sort_values(["subject_id", "admittime"])
+    
+    # Calculate previous discharge time
+    all_adm["prev_dischtime"] = all_adm.groupby("subject_id")["dischtime"].shift(1)
+    all_adm["days_since_last"] = (all_adm["admittime"] - all_adm["prev_dischtime"]).dt.total_seconds() / (24 * 3600)
+    
+    # Identify 30-day readmissions (gap < 30 days and > 0)
+    all_adm["is_30d_readmit"] = (all_adm["days_since_last"] <= 30) & (all_adm["days_since_last"] > 0)
+    
+    # Cumulative sums
+    # 1. Total prior admissions (cumcount)
+    all_adm["num_prior_admissions"] = all_adm.groupby("subject_id").cumcount()
+    
+    # 2. Total prior 30-day readmissions
+    all_adm["num_prior_30d_readmissions"] = all_adm.groupby("subject_id")["is_30d_readmit"].cumsum() - all_adm["is_30d_readmit"].astype(int)
+    
+    # Select relevant columns to merge
+    features = all_adm[["hadm_id", "num_prior_admissions", "num_prior_30d_readmissions", "days_since_last"]]
+    
+    # Merge back into cohort
+    print("Merging history features...")
+    # Use left join to keep only cohort rows
+    cohort = cohort.merge(features, on="hadm_id", how="left")
+    
+    # Fill NaNs for days_since_last (first admission has no gap)
+    # We can use -1 to indicate "never"
+    cohort["days_since_last_discharge"] = cohort["days_since_last"].fillna(-1)
+    cohort.drop(columns=["days_since_last"], inplace=True)
+    
+    return cohort
 
-def main(args):
+def main(args: argparse.Namespace):
+    import gc
+    
     df_demo = load_cohort(args.demo_file)
+    
+    # Augment with history features
+    df_demo = augment_cohort_with_history(df_demo, args.admissions_file)
+    
+    # Add new features to global DEMO_COLS so they are preserved
+    global DEMO_COLS
+    new_features = ["num_prior_admissions", "num_prior_30d_readmissions", "days_since_last_discharge"]
+    # Only add if not already present to avoid duplicates on re-runs
+    for f in new_features:
+        if f not in DEMO_COLS:
+            DEMO_COLS.append(f)
+            
     # Handle target column naming
     if "readmitted_within_30days" not in df_demo.columns and "readmitted_within_window" in df_demo.columns:
         df_demo["readmitted_within_30days"] = df_demo["readmitted_within_window"]
@@ -590,55 +726,99 @@ def main(args):
         df_demo["split"] = "train"
     if "splits" not in df_demo.columns:
         df_demo["splits"] = df_demo["split"]
+    
     os.makedirs(args.save_dir, exist_ok=True)
+    temp_chunk_dir = os.path.join(args.save_dir, "temp_chunks")
+    os.makedirs(temp_chunk_dir, exist_ok=True)
 
+    print("Loading raw EHR files...")
     df_icd = preprocess_icd(args.icd_file, df_demo)
     df_lab = preprocess_lab(args.lab_file, df_demo) if not args.skip_labs else None
-    df_med = preprocess_med(args.med_file, df_demo) if not args.skip_meds else None
+    df_med = preprocess_med(args.med_file, df_demo, args.ndc_map_file) if not args.skip_meds else None
+    print("Raw EHR files loaded.")
+    
+    # Pre-compute global features to ensure consistency across chunks
+    global_icd_cols = set(df_icd["SUBGROUP"].unique()) if df_icd is not None else set()
+    global_icd_cols = {c for c in global_icd_cols if isinstance(c, str) and c not in SUBGOUPRS_EXCLUDED}
+    
+    global_lab_cols = set(df_lab["label_fluid"].unique()) if df_lab is not None else set()
+    global_lab_cols = {c for c in global_lab_cols if isinstance(c, str)}
+    
+    global_med_cols = set(df_med["MED_THERAPEUTIC_CLASS_DESCRIPTION"].unique()) if df_med is not None else set()
+    global_med_cols = {c for c in global_med_cols if isinstance(c, str) and c not in SUBGOUPRS_EXCLUDED}
+    
+    print(f"Global features identified: {len(global_icd_cols)} ICD groups, {len(global_lab_cols)} Labs, {len(global_med_cols)} Med classes.")
 
-    # icd
-    df_icd_count = ehr_bag_of_words_mimic(
-        df_demo, df_icd, col_name="SUBGROUP", time_step_by="day", filter_freq=None
-    )
+    # Processing in chunks
+    chunk_size = args.chunk_size
+    num_chunks = (len(df_demo) + chunk_size - 1) // chunk_size
+    print(f"Processing {len(df_demo)} admissions in {num_chunks} chunks (size={chunk_size})...")
 
-    # lab
-    if df_lab is not None:
-        df_lab_onehot = lab_one_hot_mimic(
-            df_demo, df_lab, col_name="label_fluid", time_step_by="day", filter_freq=None
-        )
-    else:
-        df_lab_onehot = None
+    chunk_files = []
+    
+    for i in tqdm(range(num_chunks), desc="Chunks"):
+        start_idx = i * chunk_size
+        end_idx = min((i + 1) * chunk_size, len(df_demo))
+        
+        chunk_file = os.path.join(temp_chunk_dir, f"chunk_{i}_{start_idx}_{end_idx}.pkl")
+        chunk_files.append(chunk_file)
+        
+        if os.path.exists(chunk_file):
+            print(f"Chunk {i} already exists, skipping...")
+            continue
+            
+        print(f"Processing chunk {i} ({start_idx} to {end_idx})...", flush=True)
+        df_chunk = df_demo.iloc[start_idx:end_idx].copy()
+        
+        try:
+            df_chunk_res = process_chunk(
+                i, df_chunk, df_icd, df_lab, df_med, 
+                global_icd_cols, global_lab_cols, global_med_cols, 
+                args
+            )
+            
+            with open(chunk_file, "wb") as f:
+                pickle.dump(df_chunk_res, f)
+            
+            del df_chunk_res
+            del df_chunk
+            gc.collect()
+            print(f"[Progress] Finished chunk {i+1}/{num_chunks}", flush=True)
+            
+        except Exception as e:
+            print(f"Error processing chunk {i}: {e}", flush=True)
+            raise e
 
-    # medication
-    if df_med is not None:
-        df_med_count = ehr_bag_of_words_mimic(
-            df_demo,
-            df_med,
-            col_name="MED_THERAPEUTIC_CLASS_DESCRIPTION",
-            time_step_by="day",
-            filter_freq=None,
-        )
-    else:
-        df_med_count = None
+    print("Aggregating chunks...")
+    all_chunks = []
+    for cf in tqdm(chunk_files, desc="Loading Chunks"):
+        with open(cf, "rb") as f:
+            all_chunks.append(pickle.load(f))
+            
+    df_combined = pd.concat(all_chunks, axis=0, ignore_index=True)
+    del all_chunks
+    gc.collect()
+    
+    print(f"Final combined shape: {df_combined.shape}")
 
-    # combine
-    parts = [df_icd_count]
-    if df_lab_onehot is not None:
-        parts.append(df_lab_onehot)
-    if df_med_count is not None:
-        parts.append(df_med_count)
-
-    df_combined = pd.concat(parts, axis=1)
-
-    # drop duplicated columns
+    # drop duplicated columns (again, just in case)
     df_combined = df_combined.loc[:, ~df_combined.columns.duplicated()]
+    
+    # Save full combined raw CSV
     df_combined.to_csv(os.path.join(args.save_dir, "ehr_combined.csv"), index=False)
 
-    for format in ["cat_embedding", "one_hot"]:
+    formats = []
+    if not args.skip_cat_embedding:
+        formats.append("cat_embedding")
+    if not args.skip_one_hot:
+        formats.append("one_hot")
+
+    for format in formats:
+        print(f"Generating {format} representation...")
         if format == "cat_embedding":
-            preproc_dict = preproc_ehr_cat_embedding(df_combined)
+            preproc_dict = preproc_ehr_cat_embedding(df_combined.copy())
         else:
-            preproc_dict = preproc_ehr(df_combined)
+            preproc_dict = preproc_ehr(df_combined.copy())
 
         feature_cols = preproc_dict["feature_cols"]
         demo_cols = [
@@ -668,18 +848,10 @@ def main(args):
         preproc_dict["med_cols"] = med_cols
 
         # save
-        with open(
-            os.path.join(args.save_dir, "ehr_preprocessed_all_{}.pkl".format(format)),
-            "wb",
-        ) as pf:
+        out_file = os.path.join(args.save_dir, "ehr_preprocessed_all_{}.pkl".format(format))
+        with open(out_file, "wb") as pf:
             pickle.dump(preproc_dict, pf)
-        print(
-            "Saved to {}".format(
-                os.path.join(
-                    args.save_dir, "ehr_preprocessed_all_{}.pkl".format(format)
-                )
-            )
-        )
+        print(f"Saved to {out_file}")
 
         # also save it into sequences for temporal models
         seq_dict = ehr2sequence(preproc_dict, df_demo, by="day")
@@ -688,13 +860,11 @@ def main(args):
         seq_dict["icd_cols"] = icd_cols
         seq_dict["lab_cols"] = lab_cols
         seq_dict["med_cols"] = med_cols
-        with open(
-            os.path.join(
-                args.save_dir, "ehr_preprocessed_seq_by_day_{}.pkl".format(format)
-            ),
-            "wb",
-        ) as pf:
+        
+        seq_out_file = os.path.join(args.save_dir, "ehr_preprocessed_seq_by_day_{}.pkl".format(format))
+        with open(seq_out_file, "wb") as pf:
             pickle.dump(seq_dict, pf)
+        print(f"Saved sequences to {seq_out_file}")
 
 
 if __name__ == "__main__":
@@ -737,6 +907,46 @@ if __name__ == "__main__":
     parser.add_argument(
         "--save_dir", type=str, default=None, help="Dir to save preprocessed files."
     )
+    parser.add_argument(
+        "--admissions_file",
+        type=str,
+        default="physionet.org/files/mimiciv/3.1/hosp/admissions.csv.gz",
+        help="Path to raw admissions file for history calculation.",
+    )
+    parser.add_argument(
+        "--chunk_size", type=int, default=2000, help="Number of admissions to process per chunk."
+    )
+    parser.add_argument(
+        "--ndc_map_file",
+        type=str,
+        default=str(REPO_ROOT / "refs/readmit-stgnn/data/ndc2therapeutic.csv"),
+        help="Path to NDC to therapeutic class mapping file.",
+    )
 
-    args = parser.parse_args()
-    main(args)
+        parser.add_argument(
+
+            "--skip-cat-embedding",
+
+            action="store_true",
+
+            help="Skip generating categorical embedding (LabelEncoded) artifacts.",
+
+        )
+
+        parser.add_argument(
+
+            "--skip-one-hot",
+
+            action="store_true",
+
+            help="Skip generating one-hot encoded artifacts.",
+
+        )
+
+    
+
+        args = parser.parse_args()
+
+        main(args)
+
+    

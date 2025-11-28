@@ -1,0 +1,94 @@
+{
+  "date": "2025-11-27",
+  "agents": ["Claude Code"],
+  "project": "MIMIC-IV Readmission / EHR Embedding",
+  "starting_plan": [
+    "Fix OOM error in EHR preprocessing",
+    "Implement chunking for memory safety",
+    "Add prior admission history features",
+    "Prepare Deep Learning Encoder script"
+  ],
+  "data": {
+    "sources": ["MIMIC-IV (hosp/admissions, diagnoses, labs, meds)"],
+    "rows_after_filters": 140685,
+    "transforms": [
+      "Vectorized day-expansion",
+      "Chunked processing (2k batch)",
+      "Prior history aggregation"
+    ],
+    "quality": {
+      "missing_pct": "TBD (Job Running)",
+      "label_balance": "TBD"
+    }
+  },
+  "experiments": [
+    {
+      "id": "Job-46740657",
+      "slice": "Long-LOS Cohort",
+      "model": "Preprocessing Pipeline",
+      "key_change": "Chunking + History Features",
+      "metrics": {
+        "status": "Running"
+      },
+      "notes": "Refactored for memory safety and feature enrichment"
+    }
+  ],
+  "analysis": {
+    "top_features": [
+      "num_prior_admissions",
+      "num_prior_30d_readmissions",
+      "days_since_last_discharge"
+    ],
+    "sanity_checks": [
+      "Global column consistency across chunks",
+      "Subject-wise validation split"
+    ]
+  },
+  "artifacts": [
+    {
+      "name": "ehr/preprocess_ehr.py",
+      "purpose": "Robust, chunked feature generation script"
+    },
+    {
+      "name": "ehr/train_ehr_encoder.py",
+      "purpose": "GRU/LSTM embedding trainer with leakage protection"
+    },
+    {
+      "name": "scripts/slurm/train_ehr_encoder.sbatch",
+      "purpose": "GPU training job definition"
+    }
+  ],
+  "impact": {
+    "utility": "Added critical 'frequent flyer' signal (prior history)",
+    "robustness": "Pipeline no longer crashes on large cohorts",
+    "decision_readiness": "Ready for large-scale embedding generation",
+    "risks": ["Training time for GRU"]
+  },
+  "deviations": [
+    "Combined history feature logic directly into preprocessing instead of separate script"
+  ],
+  "open_questions": [
+    {
+      "question": "Optimal embedding dimension?",
+      "evidence_needed": "Validation AUROC comparison"
+    }
+  ],
+  "next_steps": [
+    {
+      "owner": "Claude Code",
+      "action": "Submit training job",
+      "success": "ehr_embeddings.npz created"
+    }
+  ],
+  "reproducibility": {
+    "entry_points": [
+      "scripts/slurm/preprocess_ehr_long_los.sbatch",
+      "scripts/slurm/train_ehr_encoder.sbatch"
+    ],
+    "config": {
+      "chunk_size": 2000,
+      "model_type": "gru"
+    },
+    "lineage": "MIMIC-IV -> Chunked Preproc -> Sequence Pickle -> GRU Encoder"
+  }
+}
