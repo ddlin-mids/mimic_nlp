@@ -27,13 +27,27 @@ The following table confirms the balance of key covariates across the generated 
 2.  **Feature Preservation:** Updated `ehr/preprocess_ehr.py` to explicitly preserve and encode cohort-specific features like `is_cardiorenal_long`, `admission_type`, and `discharge_location` which were previously being dropped.
 3.  **Composite Stratification:** Verified that stratification logic correctly balances multiple competing demographic and clinical factors.
 
-## Technical Challenges & Solutions (OOM Fix)
-**Issue:** Job 46745045 failed with an OOM error after successfully generating the `cat_embedding` artifacts but before completing the `one_hot` encoding. The sequential execution of both memory-intensive tasks in a single process caused fragmentation exceeding 128GB.
+## Technical Challenges & Solutions
+### 1. OOM Error in Preprocessing
+**Issue:** Job 46745045 failed with an OOM error due to sequential execution of memory-intensive tasks.
+**Resolution:** Implemented idempotency checks and separated the `one_hot` generation into a recovery job (46745623) with a dedicated flag `--skip-cat-embedding`.
 
-**Resolution:**
-1.  **Idempotency:** Updated `ehr/preprocess_ehr.py` to check if output files exist before starting processing.
-2.  **Job Separation:** Submitted Recovery Job 46745623 with a new flag `--skip-cat-embedding`. This forces the script to bypass the already completed steps and dedicate all resources to the `one_hot` generation.
-3.  **Status:** **Success.** The pipeline is now complete.
+### 2. Static Encoder OOM
+**Issue:** Job 46745678 failed to load the 5.8GB CSV into memory (64GB limit).
+**Resolution:** Resubmitted (Job 46745709) with 128GB memory allocation.
+
+### 3. Temporal Encoder Crash & Logic Error
+**Issue:** Job 46745677 crashed with a `TypeError` due to object arrays in the input pickle. Additionally, code analysis revealed the model was only embedding the 4 demographic features and ignoring 6000+ clinical count features.
+**Resolution (Refactoring `train_ehr_encoder.py`):**
+*   **Input Sanitization:** Added a robust sanitization loop to force-convert all feature arrays to `float32`, fixing the object array crash.
+*   **Hybrid Architecture:** Redesigned the `EHREncoder` to handle mixed inputs:
+    *   **Categorical (Demographics):** Passed through `nn.Embedding`.
+    *   **Numerical (Counts):** Projected via `nn.Linear`.
+    *   **Fusion:** Concatenated both streams before the RNN.
+
+### 4. Note Embedding Time Limit
+**Issue:** Job 46745567 was insufficient (6h) to process both Discharge Summaries and Radiology Reports.
+**Resolution:** Cancelled job after Discharge completion. Modified `embed_notes_bioclinical_mbert.py` to support `--skip-existing` and resubmitted (Job 46746163) with 20h time limit.
 
 ## Strict Splitting Enforcement
 **Issue:** Both the neural encoder (`train_ehr_encoder.py`) and the static baseline (`encode_ehr_static_boe.py`) were previously performing operations (random splitting or global fitting) that ignored the rigorous pre-defined cohort splits, risking data leakage.
@@ -72,15 +86,24 @@ The EHR processing pipeline consists of three distinct stages designed to produc
     *   **Logic:** Processes daily feature vectors sequentially to capture patient trajectory and state evolution. Trained via supervised learning on the readmission target.
     *   **Output:** `structured_ehr_embeddings.npz`. Captures temporal dynamics.
 
+4.  **Note Encoder (`ehr/embed_notes_bioclinical_mbert.py`)**
+    *   **Method:** BioClinical ModernBERT-Base (Hugging Face).
+    *   **Logic:** Encodes Discharge Summaries and Radiology Reports using the full 8192 token context window. Extracts the `[CLS]` token as the document representation.
+    *   **Optimization:** Uses `bfloat16` precision and native Scaled Dot Product Attention (`sdpa`) for efficient A30 GPU inference.
+    *   **Output:** `discharge_summary.npz`, `radiology_report.npz`.
+
 ## Experiments & Artifacts
-- **Job ID:** Job-46745045 (Partial), Job-46745623 (Success)
-- **Goal:** Generate `cat_embedding` (for GRU/RNNs) and `one_hot` (for Baselines) representations.
+- **Job ID:** Job-46745045 (Partial), Job-46745623 (Success), Job-46746163 (Running)
+- **Goal:** Generate `cat_embedding` (for GRU/RNNs), `one_hot` (for Baselines), and Note Embeddings.
 - **Key Artifacts:**
     - `data/interim/readmit_analysis/long_los_cohort.csv`: The canonical cohort file with valid splits.
     - `ehr/cohort_eda.py`: The source of truth for cohort generation and splitting.
     - `ehr/preprocess_ehr.py`: The preprocessing logic for feature extraction.
+    - `ehr/embed_notes_bioclinical_mbert.py`: The script for generating note embeddings.
 
 ## Next Steps
 1.  Submit the preprocessing job (`scripts/slurm/preprocess_ehr_long_los.sbatch`) - **COMPLETED**.
-2.  Submit `scripts/slurm/train_ehr_encoder.sbatch` (Temporal Embeddings).
-3.  Submit `scripts/slurm/encode_ehr_static.sbatch` (Static Baseline Embeddings).
+2.  Submit `scripts/slurm/train_ehr_encoder.sbatch` (Temporal Embeddings) - **RESUBMITTING**.
+3.  Submit `scripts/slurm/encode_ehr_static.sbatch` (Static Baseline Embeddings) - **SUBMITTED (Job 46745709)**.
+4.  Submit `scripts/slurm/embed_notes_bioclinical_mbert.sbatch` (Note Embeddings) - **RESUBMITTED (Job 46746163)**.
+5.  **Develop Fusion Classifier:** Implement a Late-Fusion MLP to combine EHR GRU embeddings with ModernBERT Note embeddings for final prediction.

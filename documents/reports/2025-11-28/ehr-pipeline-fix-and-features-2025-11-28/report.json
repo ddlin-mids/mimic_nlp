@@ -44,6 +44,26 @@
         "status": "Success"
       },
       "notes": "Completed 'one_hot' generation using full RAM. Preprocessing pipeline is now fully operational and complete."
+    },
+    {
+      "id": "Job-46745567",
+      "slice": "Long-LOS (Split)",
+      "model": "BioClinical ModernBERT (Base)",
+      "key_change": "Full Note Embedding (8k Context)",
+      "metrics": {
+        "status": "Cancelled / Time Limit"
+      },
+      "notes": "Cancelled to extend time limit. Step 1 (Discharge) completed successfully."
+    },
+    {
+      "id": "Job-46746163",
+      "slice": "Long-LOS (Split)",
+      "model": "BioClinical ModernBERT (Recovery)",
+      "key_change": "Skip Existing + Extended Time (20h)",
+      "metrics": {
+        "status": "Running"
+      },
+      "notes": "Added --skip-existing flag to bypass completed discharge summaries. Resumed processing radiology reports."
     }
   ],
   "analysis": {
@@ -100,12 +120,18 @@
       "owner": "Claude Code",
       "action": "Generate Baseline Embeddings",
       "success": "SVD embeddings created"
+    },
+    {
+      "owner": "Gemini CLI",
+      "action": "Train Multimodal Fusion Classifier",
+      "success": "Combined EHR+Note Model Trained"
     }
   ],
   "reproducibility": {
     "entry_points": [
       "ehr/cohort_eda.py",
-      "scripts/slurm/preprocess_ehr_long_los.sbatch"
+      "scripts/slurm/preprocess_ehr_long_los.sbatch",
+      "ehr/embed_notes_bioclinical_mbert.py"
     ],
     "config": {
       "chunk_size": 2000,

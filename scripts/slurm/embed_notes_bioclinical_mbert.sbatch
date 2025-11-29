@@ -15,7 +15,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=06:00:00
+#SBATCH --time=20:00:00
 #SBATCH --output=logs/slurm/embed_notes_bioclinical_mbert_%j.log
 
 set -euo pipefail
@@ -63,7 +63,8 @@ uv run python ehr/embed_notes_bioclinical_mbert.py \
   --model-name "$MODEL" \
   --batch-size $BATCH_SIZE \
   --max-length $MAX_LEN \
-  --dtype "$DTYPE"
+  --dtype "$DTYPE" \
+  --skip-existing
 
 # 2. Embed Radiology Reports
 echo ""
@@ -77,7 +78,8 @@ uv run python ehr/embed_notes_bioclinical_mbert.py \
   --model-name "$MODEL" \
   --batch-size $BATCH_SIZE \
   --max-length $MAX_LEN \
-  --dtype "$DTYPE"
+  --dtype "$DTYPE" \
+  --skip-existing
 
 echo ""
 echo "===================================================================="

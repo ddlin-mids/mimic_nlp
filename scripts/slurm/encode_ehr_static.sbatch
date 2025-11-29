@@ -14,8 +14,8 @@
 #SBATCH --partition=free
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=96G
 #SBATCH --time=01:00:00
 #SBATCH --output=logs/slurm/encode_ehr_static_%j.log
 
@@ -38,7 +38,7 @@ mkdir -p "$SAVE_DIR"
 uv run python ehr/encode_ehr_static_boe.py \
   --input "$INPUT_CSV" \
   --output "$OUTPUT_NPZ" \
-  --dims 128 \
+  --dims 512 \
   --cohort_file "data/interim/readmit_analysis/long_los_cohort.csv"
 
 echo "Static encoding complete."

@@ -106,6 +106,11 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Seed for deterministic row sampling when --limit is used.",
     )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip processing if the output file already exists.",
+    )
     return parser.parse_args()
 
 
@@ -284,6 +289,12 @@ def main() -> None:
         # Append column name if not standard 'text'
         if args.text_column != "text":
             out_prefix += f"_{args.text_column}"
+
+    if args.skip_existing:
+        expected_out = args.output_dir / f"{out_prefix}.npz"
+        if expected_out.exists():
+            print(f"[skip] Output file already exists: {expected_out}")
+            return
 
     print(f"[config] input={args.input_path} limit={args.limit} col={args.text_column} out={out_prefix}")
     
