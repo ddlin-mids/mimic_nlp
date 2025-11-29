@@ -26,24 +26,24 @@
   },
   "experiments": [
     {
-      "id": "Job-46743735",
+      "id": "Job-46745045",
       "slice": "Long-LOS (Split)",
       "model": "Preprocessing Pipeline",
-      "key_change": "Patient-Level Split + Full Artifact Gen",
+      "key_change": "Full Run Attempt",
       "metrics": {
-        "status": "Failed (OOM)"
+        "status": "Partial Success / OOM"
       },
-      "notes": "Crashed during cat_embedding generation (fillna on 6k cols)."
+      "notes": "Successfully generated 'cat_embedding' (flat & sequential). OOM'd during 'one_hot' generation due to memory fragmentation."
     },
     {
-      "id": "Job-Pending",
+      "id": "Job-46745623",
       "slice": "Long-LOS (Split)",
-      "model": "Preprocessing Pipeline (Memory Optimized)",
-      "key_change": "Chunked FillNA + No Copy + Resume from CSV",
+      "model": "Preprocessing Pipeline (Recovery)",
+      "key_change": "Idempotency + Skip Existing Artifacts",
       "metrics": {
-        "status": "Pending"
+        "status": "Success"
       },
-      "notes": "Optimized to run within 128GB RAM. Skips raw processing if combined CSV exists."
+      "notes": "Completed 'one_hot' generation using full RAM. Preprocessing pipeline is now fully operational and complete."
     }
   ],
   "analysis": {

@@ -33,6 +33,7 @@ uv run python ehr/preprocess_ehr.py \
   --icd_file physionet.org/files/mimiciv/3.1/hosp/diagnoses_icd.csv.gz \
   --lab_file physionet.org/files/mimiciv/3.1/hosp/labevents.csv.gz \
   --med_file physionet.org/files/mimiciv/3.1/hosp/prescriptions.csv.gz \
-  --save_dir data/interim/ehr_long_los
+  --save_dir data/interim/ehr_long_los \
+  --skip-cat-embedding
 
 echo "Completed EHR preprocessing."

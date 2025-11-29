@@ -38,6 +38,7 @@ mkdir -p "$SAVE_DIR"
 uv run python ehr/encode_ehr_static_boe.py \
   --input "$INPUT_CSV" \
   --output "$OUTPUT_NPZ" \
-  --dims 128
+  --dims 128 \
+  --cohort_file "data/interim/readmit_analysis/long_los_cohort.csv"
 
 echo "Static encoding complete."

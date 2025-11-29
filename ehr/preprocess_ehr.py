@@ -427,13 +427,18 @@ def preproc_ehr_cat_embedding(X: pd.DataFrame) -> Dict[str, Any]:
     categorical_dims = {}
     # Process categorical columns (LabelEncoder)
     # This loop is necessary as LabelEncoder is per-column
-    for col in tqdm(cols_to_encode, desc="Label Encoding"):
+    import gc
+    for i, col in enumerate(tqdm(cols_to_encode, desc="Label Encoding")):
         l_enc = LabelEncoder()
         X[col] = X[col].fillna("VV_likely")
         X[col] = X[col].replace({0.23990602999011235: "UNKNOWN"})
         # Ensure string type for robust encoding
         X[col] = l_enc.fit_transform(X[col].astype(str).values)
         categorical_dims[col] = len(l_enc.classes_)
+        
+        # Explicit GC every 50 iterations to prevent fragmentation
+        if i % 50 == 0:
+            gc.collect()
 
     # Identify numerical columns (everything else)
     feature_cols = [c for c in X.columns if c not in COLS_IRRELEVANT and c != target]
@@ -532,47 +537,55 @@ def preproc_ehr(X: pd.DataFrame) -> Dict[str, Any]:
 
 def ehr2sequence(preproc_dict: Dict[str, Any], df_demo: pd.DataFrame, by: str = "day") -> Dict[str, Any]:
     """
-    Arrange EHR into sequences for temporal models
+    Arrange EHR into sequences for temporal models using memory-efficient grouping.
     """
+    import gc
+    
     X = preproc_dict["X"]
-    df = copy.deepcopy(X)
     feature_cols = preproc_dict["feature_cols"]
-
-    print("Rearranging to sequences by {}...".format(by))
-    X = X[feature_cols].values
-
-    X_dict = {}
-    for i in range(X.shape[0]):
-        key = (
-            str(df.iloc[i]["subject_id"])
-            + "_"
-            + str(pd.to_datetime(df.iloc[i]["date"]).date())
-        )
-        X_dict[key] = X[i]
-
-    # Build node_name -> list of day indices using admittime/dischtime rather than imaging metadata
-    node_included_files = {}
-    for _, row in tqdm(df_demo.iterrows(), total=len(df_demo)):
-        node_name = f"{row['subject_id']}_{row['hadm_id']}"
-        if node_name in node_included_files:
-            continue
-        adm = pd.to_datetime(row["admittime"]).date()
-        dis = pd.to_datetime(row["dischtime"]).date()
-        days = pd.date_range(start=adm, end=dis)
-        node_included_files[node_name] = [d.date() for d in days]
-
-    # arrange X by day
+    
+    print(f"Rearranging to sequences by {by} (memory optimized)...")
+    
+    # 1. Ensure we only work with necessary data
+    # Create a lightweight view with just the indices and features
+    cols_to_keep = ['subject_id', 'hadm_id', 'date'] + feature_cols
+    df_slim = X[cols_to_keep].copy()
+    
+    # Convert date to string format for consistency if needed, but keeping as object/datetime is fine for sorting
+    df_slim['date'] = pd.to_datetime(df_slim['date'])
+    
+    # Sort by hadm_id and date to ensure correct temporal order
+    df_slim = df_slim.sort_values(['subject_id', 'hadm_id', 'date'])
+    
+    # Create the mapping key in df_slim
+    df_slim['node_name'] = df_slim['subject_id'].astype(str) + "_" + df_slim['hadm_id'].astype(str)
+    
+    # Extract the feature matrix (this is the heavy part)
+    # We do this AFTER sorting so it aligns with the dataframe
+    print("Extracting feature matrix...")
+    feature_matrix = df_slim[feature_cols].values
+    if feature_matrix.dtype == np.float64:
+         feature_matrix = feature_matrix.astype(np.float32)
+    
+    # Efficiently group by node_name
+    print("Grouping by admission...")
+    grouped = df_slim.groupby('node_name', sort=False)
+    
     feat_dict = {}
-    for node_name, days in tqdm(node_included_files.items()):
-        subj, hadm = node_name.split("_")
-        curr_features = []
-        for dt in days:
-            key = str(subj) + "_" + str(dt)
-            feat = X_dict[key]
-            curr_features.append(feat)
+    
+    # Iterate through groups - this is safe if we don't materialize everything at once
+    # tqdm wrapper for progress
+    for node_name, group_idxs in tqdm(grouped.indices.items(), desc="Building sequences"):
+        # group_idxs is an array of integer indices into df_slim/feature_matrix
+        # Extract the slice from the matrix
+        seq = feature_matrix[group_idxs]
+        feat_dict[node_name] = seq
 
-        curr_features = np.stack(curr_features)  # (num_days, feature_dim)
-        feat_dict[node_name] = curr_features
+    # Clean up massive intermediates
+    del df_slim
+    del feature_matrix
+    del grouped
+    gc.collect()
 
     if "cat_idxs" in preproc_dict:
         cat_idxs = preproc_dict["cat_idxs"]
@@ -700,6 +713,52 @@ def augment_cohort_with_history(cohort: pd.DataFrame, admissions_path: str) -> p
     
     return cohort
 
+def optimize_dataframe_memory(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggressively optimize memory usage by:
+    1. Converting object columns that should be numeric to float32
+    2. Downcasting float64/int64 to float32/int32
+    """
+    import gc
+    print("Optimizing dataframe memory...")
+    start_mem = df.memory_usage().sum() / 1024**3
+    print(f"Initial memory usage: {start_mem:.2f} GB")
+
+    # Identify metadata/categorical columns to exclude from numeric conversion
+    # We use global variables or heuristic
+    keep_obj_cols = set(COLS_IRRELEVANT + CAT_COLUMNS + ["target", "split", "splits"])
+    
+    # 1. Fix mixed-type object columns (from DtypeWarning)
+    # Filter for object columns that are NOT in our known categorical list
+    obj_cols = [c for c in df.columns if df[c].dtype == object and c not in keep_obj_cols]
+    
+    if obj_cols:
+        print(f"Attempting to convert {len(obj_cols)} object columns to numeric...")
+        # Process in chunks to check progress
+        chunk_size = 100
+        for i in range(0, len(obj_cols), chunk_size):
+            chunk = obj_cols[i:i+chunk_size]
+            # coerce errors to NaN (which will be 0 later), then downcast
+            df[chunk] = df[chunk].apply(pd.to_numeric, errors='coerce').astype(np.float32)
+    
+    # 2. Downcast numeric columns
+    # Float64 -> Float32
+    float_cols = df.select_dtypes(include=['float64']).columns
+    if len(float_cols) > 0:
+        print(f"Downcasting {len(float_cols)} float64 columns to float32...")
+        df[float_cols] = df[float_cols].astype(np.float32)
+
+    # Int64 -> Int32
+    int_cols = df.select_dtypes(include=['int64']).columns
+    if len(int_cols) > 0:
+        print(f"Downcasting {len(int_cols)} int64 columns to int32...")
+        df[int_cols] = df[int_cols].astype(np.int32)
+        
+    gc.collect()
+    end_mem = df.memory_usage().sum() / 1024**3
+    print(f"Final memory usage: {end_mem:.2f} GB (Saved {start_mem - end_mem:.2f} GB)")
+    return df
+
 def main(args: argparse.Namespace):
     import gc
     
@@ -770,8 +829,13 @@ def main(args: argparse.Namespace):
     combined_csv_path = os.path.join(args.save_dir, "ehr_combined.csv")
     if os.path.exists(combined_csv_path):
         print(f"Found existing combined EHR data at {combined_csv_path}. Loading...")
-        df_combined = pd.read_csv(combined_csv_path)
+        # Use low_memory=False to ensure cleaner initial read despite memory cost, 
+        # because we will immediately optimize it down.
+        df_combined = pd.read_csv(combined_csv_path, low_memory=False)
         print(f"Loaded combined shape: {df_combined.shape}")
+        
+        # Optimize memory immediately
+        df_combined = optimize_dataframe_memory(df_combined)
     else:
         # Processing in chunks
         chunk_size = args.chunk_size
@@ -838,6 +902,13 @@ def main(args: argparse.Namespace):
         formats.append("one_hot")
 
     for i, format in enumerate(formats):
+        out_file = os.path.join(args.save_dir, "ehr_preprocessed_all_{}.pkl".format(format))
+        seq_out_file = os.path.join(args.save_dir, "ehr_preprocessed_seq_by_day_{}.pkl".format(format))
+
+        if os.path.exists(out_file) and os.path.exists(seq_out_file):
+            print(f"[{format}] Artifacts already exist. Skipping generation.")
+            continue
+
         print(f"Generating {format} representation...")
         # Avoid copy for the last iteration to save memory
         is_last = (i == len(formats) - 1)
@@ -876,7 +947,6 @@ def main(args: argparse.Namespace):
         preproc_dict["med_cols"] = med_cols
 
         # save
-        out_file = os.path.join(args.save_dir, "ehr_preprocessed_all_{}.pkl".format(format))
         with open(out_file, "wb") as pf:
             pickle.dump(preproc_dict, pf)
         print(f"Saved to {out_file}")
@@ -889,7 +959,6 @@ def main(args: argparse.Namespace):
         seq_dict["lab_cols"] = lab_cols
         seq_dict["med_cols"] = med_cols
         
-        seq_out_file = os.path.join(args.save_dir, "ehr_preprocessed_seq_by_day_{}.pkl".format(format))
         with open(seq_out_file, "wb") as pf:
             pickle.dump(seq_dict, pf)
         print(f"Saved sequences to {seq_out_file}")

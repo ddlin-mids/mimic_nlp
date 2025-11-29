@@ -173,29 +173,60 @@ def load_data(pkl_path, cohort_csv):
     df["node_name"] = df["subject_id"].astype(str) + "_" + df["hadm_id"].astype(str)
     labels_map = dict(zip(df["node_name"], df[target_col].astype(int)))
     
-    # Return subject mapping for splitting
-    subj_map = dict(zip(df["node_name"], df["subject_id"]))
+    # Return split mapping for strict splitting
+    if "split" in df.columns:
+        split_map = dict(zip(df["node_name"], df["split"]))
+    elif "splits" in df.columns:
+        split_map = dict(zip(df["node_name"], df["splits"]))
+    else:
+        # Fallback if no split column (should not happen in this pipeline)
+        logger.warning("No 'split' column found. Falling back to subject ID for random split.")
+        split_map = dict(zip(df["node_name"], df["subject_id"]))
         
-    return feat_dict, cat_dims, labels_map, subj_map
+    return feat_dict, cat_dims, labels_map, split_map
 
 def train_model(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
     
-    feat_dict, cat_dims, labels_map, subj_map = load_data(args.input_path, args.cohort_path)
+    feat_dict, cat_dims, labels_map, split_map = load_data(args.input_path, args.cohort_path)
     
     # Filter to valid keys
     valid_keys = [k for k in feat_dict.keys() if k in labels_map]
     
-    # Patient-level split
-    subjects = list(set(subj_map[k] for k in valid_keys))
-    train_subjs, val_subjs = train_test_split(subjects, test_size=0.2, random_state=42)
-    train_subjs_set = set(train_subjs)
+    # Split based on pre-defined column
+    train_keys = []
+    val_keys = []
+    test_keys_skipped = []
     
-    train_keys = [k for k in valid_keys if subj_map[k] in train_subjs_set]
-    val_keys = [k for k in valid_keys if subj_map[k] not in train_subjs_set]
+    # Check if split_map contains actual split names or subject IDs (fallback)
+    sample_val = next(iter(split_map.values()))
+    is_explicit_split = isinstance(sample_val, str) and sample_val in ["train", "val", "test", "validation"]
     
-    logger.info(f"Train admissions: {len(train_keys)}, Val admissions: {len(val_keys)}")
+    if is_explicit_split:
+        logger.info("Using pre-defined splits from cohort file.")
+        for k in valid_keys:
+            split = split_map.get(k)
+            if split == "train":
+                train_keys.append(k)
+            elif split in ["val", "validation"]:
+                val_keys.append(k)
+            else:
+                test_keys_skipped.append(k)
+    else:
+        logger.warning("Performing random patient-level split (NOT RECOMMENDED for final results).")
+        # Fallback: Patient-level random split
+        subj_map = split_map # In fallback mode, load_data returned subj_map
+        subjects = list(set(subj_map[k] for k in valid_keys))
+        train_subjs, val_subjs = train_test_split(subjects, test_size=0.2, random_state=42)
+        train_subjs_set = set(train_subjs)
+        
+        train_keys = [k for k in valid_keys if subj_map[k] in train_subjs_set]
+        val_keys = [k for k in valid_keys if subj_map[k] not in train_subjs_set]
+    
+    logger.info(f"Train admissions: {len(train_keys)}")
+    logger.info(f"Val admissions: {len(val_keys)}")
+    logger.info(f"Skipped (Test/Other): {len(test_keys_skipped)}")
     
     # Create dict subsets
     train_feat = {k: feat_dict[k] for k in train_keys}
