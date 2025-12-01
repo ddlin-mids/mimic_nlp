@@ -1,0 +1,7 @@
+Experiment,Modality,Model,Test AUC,Test AUPRC
+Exp-A,Demographics,XGBoost,0.5355,0.2581
+Exp-B,Static EHR,XGBoost,0.6110,0.3131
+Exp-C,All Notes,XGBoost,0.6145,0.3264
+Exp-D,Full Fusion,XGBoost,0.6371,0.3495
+Exp-E,Structured EHR (GRU),XGBoost,0.6406,0.3408
+Exp-F,Full Fusion,PyTorch MLP,0.6116,0.3271
