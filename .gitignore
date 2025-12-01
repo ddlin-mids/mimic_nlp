@@ -267,3 +267,12 @@ datasets_cache/
 .pth
 .bin
 .safetensors
+# MLflow tracking data — never commit this
+mlruns/
+mlruns/*
+
+# (optional but common)
+wandb/
+runs/
+logs/
+*.log
