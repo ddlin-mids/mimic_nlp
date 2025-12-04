@@ -10,6 +10,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
+from sklearn.decomposition import PCA
 from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, f1_score
 from transformers import get_linear_schedule_with_warmup
 import mlflow
@@ -60,11 +61,12 @@ class FusionDataLoader:
         self.discharge_path = self.base_dir / "data/interim/embeddings/notes/discharge_summary.npz"
         self.radiology_path = self.base_dir / "data/interim/embeddings/notes/radiology_report.npz"
 
-    def load_and_prep_data(self):
+    def load_and_prep_data(self, pca_components=0):
         logger.info("Loading cohort data...")
         cohort = pd.read_csv(self.cohort_path)
         cohort = cohort[cohort['is_cardiorenal_long'] == True].copy()
         cohort['target'] = cohort['readmitted_within_window'].astype(int)
+        splits = cohort['split'].values
         
         logger.info("Processing modalities...")
         demo_features = self._process_demographics(cohort)
@@ -73,11 +75,29 @@ class FusionDataLoader:
         discharge_embeds = self._load_aligned_embeddings(self.discharge_path, cohort['hadm_id'].values)
         rad_embeds = self._load_radiology_embeddings(cohort['hadm_id'].values)
         
-        X = np.hstack([demo_features, static_embeds, struct_embeds, discharge_embeds, rad_embeds])
-        y = cohort['target'].values
-        splits = cohort['split'].values
+        pca_explained = None
         
-        return X, y, splits
+        # PCA for Text
+        if pca_components > 0:
+            logger.info(f"Applying PCA (n={pca_components}) to text embeddings...")
+            text_combined = np.hstack([discharge_embeds, rad_embeds])
+            train_mask = (splits == 'train')
+            
+            pca = PCA(n_components=pca_components)
+            pca.fit(text_combined[train_mask])
+            
+            pca_explained = np.sum(pca.explained_variance_ratio_)
+            logger.info(f"PCA Explained Variance: {pca_explained:.4f}")
+            # Do NOT log to mlflow here to avoid starting a run prematurely
+            
+            text_features = pca.transform(text_combined)
+            X = np.hstack([demo_features, static_embeds, struct_embeds, text_features])
+        else:
+            X = np.hstack([demo_features, static_embeds, struct_embeds, discharge_embeds, rad_embeds])
+            
+        y = cohort['target'].values
+        
+        return X, y, splits, pca_explained
 
     def _process_demographics(self, df):
         demo_df = df[['age_at_admit', 'gender', 'race']].copy()
@@ -192,7 +212,17 @@ def main():
     parser.add_argument("--hidden_dims", type=int, nargs='+', default=[512, 256])
     parser.add_argument("--warmup_steps", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--pca_components", type=int, default=0, help="PCA components for text (0=disable)")
     args = parser.parse_args()
+
+    # --- MLflow Safety Check ---
+    if "MLFLOW_RUN_ID" in os.environ:
+        logger.warning(f"Found MLFLOW_RUN_ID in env: {os.environ['MLFLOW_RUN_ID']}. Clearing it.")
+        del os.environ["MLFLOW_RUN_ID"]
+    
+    if mlflow.active_run():
+        logger.warning(f"Ending active run: {mlflow.active_run().info.run_id}")
+        mlflow.end_run()
 
     # Seeding
     torch.manual_seed(args.seed)
@@ -203,7 +233,7 @@ def main():
     
     # Load Data
     loader = FusionDataLoader()
-    X, y, splits = loader.load_and_prep_data()
+    X, y, splits, pca_explained = loader.load_and_prep_data(pca_components=args.pca_components)
     
     X_train = X[splits == 'train']
     y_train = y[splits == 'train']
@@ -250,8 +280,12 @@ def main():
     patience = 10
     no_improve = 0
     
-    with mlflow.start_run():
+    # Use nested=True to prevent crashes if a run is already active in the environment
+    with mlflow.start_run(nested=True):
         mlflow.log_params(vars(args))
+        
+        if pca_explained is not None:
+            mlflow.log_metric("pca_explained_variance", pca_explained)
         
         for epoch in range(args.epochs):
             train_loss = train_epoch(model, train_loader, criterion, optimizer, scheduler, device)

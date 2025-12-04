@@ -30,24 +30,29 @@ class FusionDataLoader:
         self.discharge_path = self.base_dir / "data/interim/embeddings/notes/discharge_summary.npz"
         self.radiology_path = self.base_dir / "data/interim/embeddings/notes/radiology_report.npz"
 
-    def load_and_prep_data(self):
+    def load_data_dict(self):
         logger.info("Loading cohort data...")
         cohort = pd.read_csv(self.cohort_path)
         cohort = cohort[cohort['is_cardiorenal_long'] == True].copy()
-        cohort['target'] = cohort['readmitted_within_window'].astype(int)
-        
-        logger.info("Processing modalities...")
-        demo_features = self._process_demographics(cohort)
-        static_embeds = self._load_aligned_embeddings(self.static_ehr_path, cohort['hadm_id'].values)
-        struct_embeds = self._load_structured_ehr(cohort['hadm_id'].values)
-        discharge_embeds = self._load_aligned_embeddings(self.discharge_path, cohort['hadm_id'].values)
-        rad_embeds = self._load_radiology_embeddings(cohort['hadm_id'].values)
-        
-        X = np.hstack([demo_features, static_embeds, struct_embeds, discharge_embeds, rad_embeds])
-        y = cohort['target'].values
+        target = cohort['readmitted_within_window'].astype(int).values
         splits = cohort['split'].values
+        hadm_ids = cohort['hadm_id'].values
+
+        logger.info("Processing modalities...")
+        demo = self._process_demographics(cohort)
+        static = self._load_aligned_embeddings(self.static_ehr_path, hadm_ids)
+        struct = self._load_structured_ehr(hadm_ids)
+        disch = self._load_aligned_embeddings(self.discharge_path, hadm_ids)
+        rad = self._load_radiology_embeddings(hadm_ids)
         
-        return X, y, splits
+        return {
+            "demo": demo,
+            "static": static,
+            "struct": struct,
+            "text": np.hstack([disch, rad]),
+            "y": target,
+            "splits": splits
+        }
 
     def _process_demographics(self, df):
         demo_df = df[['age_at_admit', 'gender', 'race']].copy()
@@ -109,9 +114,36 @@ class FusionDataLoader:
                    for tid in target_ids]
         return np.array(aligned)
 
-def objective_xgboost(trial, X_train, y_train, X_val, y_val):
+from sklearn.decomposition import PCA
+
+def objective_xgboost(trial, data_dict):
+    splits = data_dict['splits']
+    train_idx = splits == 'train'
+    val_idx = splits == 'val'
+    
+    # 1. Feature Engineering (PCA)
+    pca_n = trial.suggest_categorical('pca_components', [0, 32, 64, 128])
+    text_data = data_dict['text']
+    
+    if pca_n > 0:
+        pca = PCA(n_components=pca_n)
+        # Fit on train only
+        pca.fit(text_data[train_idx])
+        text_feat = pca.transform(text_data)
+    else:
+        text_feat = text_data
+        
+    # 2. Concat
+    X = np.hstack([data_dict['demo'], data_dict['static'], data_dict['struct'], text_feat])
+    y = data_dict['y']
+    
+    X_train = X[train_idx]
+    y_train = y[train_idx]
+    X_val = X[val_idx]
+    y_val = y[val_idx]
+
     params = {
-        'n_estimators': 1000, # Fixed high, controlled by early stopping
+        'n_estimators': 1000, 
         'max_depth': trial.suggest_int('max_depth', 3, 10),
         'learning_rate': trial.suggest_float('learning_rate', 1e-3, 0.3, log=True),
         'subsample': trial.suggest_float('subsample', 0.5, 1.0),
@@ -121,11 +153,14 @@ def objective_xgboost(trial, X_train, y_train, X_val, y_val):
         'eval_metric': 'auc',
         'n_jobs': -1,
         'random_state': 42,
-        'tree_method': 'hist', # Faster on CPU
+        'tree_method': 'hist', 
         'early_stopping_rounds': 50
     }
     
     with mlflow.start_run(nested=True):
+        mlflow.log_params(params)
+        mlflow.log_param("pca_components", pca_n)
+        
         model = xgb.XGBClassifier(**params)
         model.fit(
             X_train, y_train,
@@ -136,19 +171,32 @@ def objective_xgboost(trial, X_train, y_train, X_val, y_val):
         preds = model.predict_proba(X_val)[:, 1]
         auc = roc_auc_score(y_val, preds)
         
-        mlflow.log_params(params)
         mlflow.log_metric("val_auc", auc)
-        try:
-            mlflow.log_metric("best_iteration", model.best_iteration)
-        except AttributeError:
-            pass # older versions or no early stopping triggered
-        
         return auc
 
-def objective_mlp(trial, X_train, y_train, X_val, y_val):
-    # MLP doesn't support easy early stopping with separate Val set in sklearn API cleanly 
-    # without partial_fit loop or internal split. We rely on internal validation fraction
-    # but we will pass Val set metrics manually for reporting.
+def objective_mlp(trial, data_dict):
+    splits = data_dict['splits']
+    train_idx = splits == 'train'
+    val_idx = splits == 'val'
+    
+    # PCA
+    pca_n = trial.suggest_categorical('pca_components', [0, 64, 128])
+    text_data = data_dict['text']
+    
+    if pca_n > 0:
+        pca = PCA(n_components=pca_n)
+        pca.fit(text_data[train_idx])
+        text_feat = pca.transform(text_data)
+    else:
+        text_feat = text_data
+        
+    X = np.hstack([data_dict['demo'], data_dict['static'], data_dict['struct'], text_feat])
+    y = data_dict['y']
+    
+    X_train = X[train_idx]
+    y_train = y[train_idx]
+    X_val = X[val_idx]
+    y_val = y[val_idx]
     
     # Layer configs
     n_layers = trial.suggest_int('n_layers', 1, 3)
@@ -165,29 +213,56 @@ def objective_mlp(trial, X_train, y_train, X_val, y_val):
         'learning_rate_init': trial.suggest_float('learning_rate_init', 1e-4, 1e-2, log=True),
         'batch_size': 128,
         'max_iter': 200,
-        'early_stopping': True, # Internal split
+        'early_stopping': True,
         'validation_fraction': 0.1,
         'random_state': 42
     }
     
     with mlflow.start_run(nested=True):
+        mlflow.log_params(params)
+        mlflow.log_param("pca_components", pca_n)
+        
         model = MLPClassifier(**params)
         model.fit(X_train, y_train)
         
         preds = model.predict_proba(X_val)[:, 1]
         auc = roc_auc_score(y_val, preds)
         
-        mlflow.log_params(params)
         mlflow.log_metric("val_auc", auc)
-        
         return auc
 
-def train_best_model(model_type, best_params, X_train, y_train, X_test, y_test):
+def train_best_model(model_type, best_params, data_dict):
     logger.info(f"Training best {model_type} model...")
+    
+    splits = data_dict['splits']
+    train_idx = splits == 'train'
+    test_idx = splits == 'test'
+    
+    # Apply PCA if in params
+    pca_n = best_params.get('pca_components', 0)
+    text_data = data_dict['text']
+    
+    if pca_n > 0:
+        pca = PCA(n_components=pca_n)
+        pca.fit(text_data[train_idx])
+        text_feat = pca.transform(text_data)
+    else:
+        text_feat = text_data
+        
+    X = np.hstack([data_dict['demo'], data_dict['static'], data_dict['struct'], text_feat])
+    y = data_dict['y']
+    
+    X_train = X[train_idx]
+    y_train = y[train_idx]
+    X_test = X[test_idx]
+    y_test = y[test_idx]
     
     if model_type == "xgboost":
         # Re-add fixed params not optimized
         final_params = best_params.copy()
+        # Remove non-XGB params
+        final_params.pop('pca_components', None)
+        
         final_params.update({
             'n_estimators': 1000, 
             'eval_metric': 'auc', 
@@ -197,10 +272,7 @@ def train_best_model(model_type, best_params, X_train, y_train, X_test, y_test):
             'early_stopping_rounds': 50
         })
         
-        # We need a validation set for early stopping even in final training
-        # Usually we split Train again or just reuse Test (if strict disallowed, split Train)
-        # For simplicity, we reuse Test for early stopping monitoring here strictly for stopping criteria, 
-        # but report final metrics on it. OR we split train. Let's split train 90/10 for stopping.
+        # Internal split for early stopping
         from sklearn.model_selection import train_test_split
         X_tr_final, X_val_final, y_tr_final, y_val_final = train_test_split(
             X_train, y_train, test_size=0.1, random_state=42
@@ -221,10 +293,10 @@ def train_best_model(model_type, best_params, X_train, y_train, X_test, y_test):
             layers.append(best_params[f'n_units_l{i}'])
             i += 1
         
-        # Filter out helper keys (n_layers, n_units_l*)
+        # Filter out helper keys
         final_params = {
             k: v for k, v in best_params.items() 
-            if not k.startswith('n_units_l') and k != 'n_layers'
+            if not k.startswith('n_units_l') and k != 'n_layers' and k != 'pca_components'
         }
         final_params['hidden_layer_sizes'] = tuple(layers)
         final_params.update({'max_iter': 500, 'random_state': 42, 'solver': 'adam', 'batch_size': 128})
@@ -270,16 +342,9 @@ def main():
     mlflow.set_experiment("mimic_cardiorenal_readmission")
     
     loader = FusionDataLoader()
-    X, y, splits = loader.load_and_prep_data()
+    data_dict = loader.load_data_dict()
     
-    X_train = X[splits == 'train']
-    y_train = y[splits == 'train']
-    X_val = X[splits == 'val']
-    y_val = y[splits == 'val']
-    X_test = X[splits == 'test']
-    y_test = y[splits == 'test']
-    
-    logger.info(f"Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
+    logger.info(f"Loaded data. Splits: {pd.Series(data_dict['splits']).value_counts().to_dict()}")
     
     with mlflow.start_run(run_name=f"HPO_{args.model.upper()}"):
         mlflow.log_param("model_type", args.model)
@@ -288,9 +353,9 @@ def main():
         study = optuna.create_study(direction="maximize")
         
         if args.model == "xgboost":
-            objective = lambda trial: objective_xgboost(trial, X_train, y_train, X_val, y_val)
+            objective = lambda trial: objective_xgboost(trial, data_dict)
         else:
-            objective = lambda trial: objective_mlp(trial, X_train, y_train, X_val, y_val)
+            objective = lambda trial: objective_mlp(trial, data_dict)
             
         study.optimize(objective, n_trials=args.trials)
         
@@ -301,10 +366,7 @@ def main():
         mlflow.log_params(study.best_params)
         mlflow.log_metric("best_val_auc", study.best_value)
         
-        # Train final model on Train (and check on Test)
-        # Note: Ideally we retrain on Train+Val, but to keep strict separation we train on Train
-        # and see how the best hyperparams perform on Test.
-        test_metrics = train_best_model(args.model, study.best_params, X_train, y_train, X_test, y_test)
+        test_metrics = train_best_model(args.model, study.best_params, data_dict)
         
         mlflow.log_metrics(test_metrics)
         logger.info(f"Test Metrics: {test_metrics}")

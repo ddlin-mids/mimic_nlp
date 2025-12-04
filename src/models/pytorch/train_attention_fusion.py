@@ -11,7 +11,7 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.decomposition import PCA
 from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, f1_score
-from transformers import get_linear_schedule_with_warmup
+from transformers import get_cosine_schedule_with_warmup
 import mlflow
 import mlflow.pytorch
 
@@ -19,7 +19,7 @@ import mlflow.pytorch
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class LateFusionDataset(Dataset):
+class AttentionFusionDataset(Dataset):
     def __init__(self, ehr_data, txt_data, y):
         self.ehr = torch.FloatTensor(ehr_data)
         self.txt = torch.FloatTensor(txt_data)
@@ -29,55 +29,62 @@ class LateFusionDataset(Dataset):
         return len(self.y)
     
     def __getitem__(self, idx):
-        return {
-            'ehr': self.ehr[idx],
-            'txt': self.txt[idx]
-        }, self.y[idx]
+        return self.ehr[idx], self.txt[idx], self.y[idx]
 
-class LateFusionModel(nn.Module):
-    def __init__(self, ehr_dim, txt_dim, hidden_dim=128, dropout=0.5):
+class AttentionFusionModel(nn.Module):
+    def __init__(self, ehr_dim, txt_dim, embed_dim=128, num_heads=4, dropout=0.3):
         super().__init__()
         
-        # Tower A: Structured EHR (Demo + Static + GRU)
-        # Process dense, high-signal features
-        self.ehr_tower = nn.Sequential(
-            nn.Linear(ehr_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout / 2) # Less dropout for structured data
+        # Projectors to common dimension
+        self.ehr_proj = nn.Sequential(
+            nn.Linear(ehr_dim, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.GELU(),
+            nn.Dropout(dropout)
         )
         
-        # Tower B: Text Embeddings (Notes)
-        # Bottleneck for high-dimensional, noisy text features
-        self.txt_tower = nn.Sequential(
-            nn.Linear(txt_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout) # Higher dropout for text
+        self.txt_proj = nn.Sequential(
+            nn.Linear(txt_dim, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.GELU(),
+            nn.Dropout(dropout)
         )
         
-        # Gating / Fusion Head
-        # Concatenate processed features
-        fusion_dim = hidden_dim * 2
+        # Cross-Modal Attention
+        # embed_dim must be divisible by num_heads
+        self.attention = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=True, dropout=dropout)
         
+        # Classifier
         self.classifier = nn.Sequential(
-            nn.Linear(fusion_dim, hidden_dim // 2),
-            nn.BatchNorm1d(hidden_dim // 2),
-            nn.ReLU(),
+            nn.Linear(embed_dim * 2, embed_dim), # Concatenate attended features
+            nn.LayerNorm(embed_dim),
+            nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1)
+            nn.Linear(embed_dim, 1)
         )
         
     def forward(self, x_ehr, x_txt):
-        ehr_emb = self.ehr_tower(x_ehr)
-        txt_emb = self.txt_tower(x_txt)
+        # Project to latent space
+        # (Batch, Dim) -> (Batch, 1, Dim)
+        h_ehr = self.ehr_proj(x_ehr).unsqueeze(1)
+        h_txt = self.txt_proj(x_txt).unsqueeze(1)
         
-        # Concatenate
-        combined = torch.cat([ehr_emb, txt_emb], dim=1)
+        # Create sequence: [EHR, Text]
+        # (Batch, 2, Dim)
+        sequence = torch.cat([h_ehr, h_txt], dim=1)
         
-        return self.classifier(combined)
+        # Self-Attention
+        # attn_output: (Batch, 2, Dim)
+        attn_output, attn_weights = self.attention(sequence, sequence, sequence)
+        
+        # Flatten and Classify
+        # (Batch, 2*Dim)
+        flat = attn_output.reshape(attn_output.size(0), -1)
+        logits = self.classifier(flat)
+        
+        return logits, attn_weights
 
-class SeparateDataLoader:
+class FusionDataLoader:
     def __init__(self, base_dir="."):
         self.base_dir = Path(base_dir)
         self.cohort_path = self.base_dir / "data/interim/readmit_analysis/long_los_cohort.csv"
@@ -87,7 +94,7 @@ class SeparateDataLoader:
         self.discharge_path = self.base_dir / "data/interim/embeddings/notes/discharge_summary.npz"
         self.radiology_path = self.base_dir / "data/interim/embeddings/notes/radiology_report.npz"
 
-    def load_data(self):
+    def load_data(self, pca_components=0):
         logger.info("Loading cohort data...")
         cohort = pd.read_csv(self.cohort_path)
         cohort = cohort[cohort['is_cardiorenal_long'] == True].copy()
@@ -99,18 +106,24 @@ class SeparateDataLoader:
         demo = self._process_demographics(cohort)
         static = self._load_aligned_embeddings(self.static_ehr_path, ids)
         struct = self._load_structured_ehr(ids)
-        
         ehr_data = np.hstack([demo, static, struct])
         
         # 2. Text Group (Discharge + Radiology)
         disch = self._load_aligned_embeddings(self.discharge_path, ids)
         rad = self._load_radiology_embeddings(ids)
-        
         txt_data = np.hstack([disch, rad])
         
-        logger.info(f"EHR Dim: {ehr_data.shape[1]}, Text Dim: {txt_data.shape[1]}")
+        pca_explained = None
+        if pca_components > 0:
+            logger.info(f"Applying PCA (n={pca_components}) to text...")
+            train_idx = splits == 'train'
+            pca = PCA(n_components=pca_components)
+            pca.fit(txt_data[train_idx])
+            pca_explained = np.sum(pca.explained_variance_ratio_)
+            txt_data = pca.transform(txt_data)
+            logger.info(f"PCA Variance: {pca_explained:.4f}")
         
-        return ehr_data, txt_data, y, splits
+        return ehr_data, txt_data, y, splits, pca_explained
 
     def _process_demographics(self, df):
         demo_df = df[['age_at_admit', 'gender', 'race']].copy()
@@ -157,14 +170,12 @@ class SeparateDataLoader:
 def train_epoch(model, loader, criterion, optimizer, scheduler, device):
     model.train()
     total_loss = 0
-    for inputs, y_batch in loader:
-        x_ehr = inputs['ehr'].to(device)
-        x_txt = inputs['txt'].to(device)
-        y_batch = y_batch.to(device).unsqueeze(1)
+    for x_ehr, x_txt, y in loader:
+        x_ehr, x_txt, y = x_ehr.to(device), x_txt.to(device), y.to(device).unsqueeze(1)
         
         optimizer.zero_grad()
-        logits = model(x_ehr, x_txt)
-        loss = criterion(logits, y_batch)
+        logits, _ = model(x_ehr, x_txt)
+        loss = criterion(logits, y)
         
         loss.backward()
         optimizer.step()
@@ -180,19 +191,17 @@ def evaluate(model, loader, criterion, device):
     all_preds = []
     all_targets = []
     
-    for inputs, y_batch in loader:
-        x_ehr = inputs['ehr'].to(device)
-        x_txt = inputs['txt'].to(device)
-        y_batch = y_batch.to(device).unsqueeze(1)
+    for x_ehr, x_txt, y in loader:
+        x_ehr, x_txt, y = x_ehr.to(device), x_txt.to(device), y.to(device).unsqueeze(1)
         
-        logits = model(x_ehr, x_txt)
-        loss = criterion(logits, y_batch)
+        logits, _ = model(x_ehr, x_txt)
+        loss = criterion(logits, y)
         
         probs = torch.sigmoid(logits).cpu().numpy()
         
         total_loss += loss.item()
         all_preds.extend(probs)
-        all_targets.extend(y_batch.cpu().numpy())
+        all_targets.extend(y.cpu().numpy())
         
     all_preds = np.array(all_preds)
     all_targets = np.array(all_targets)
@@ -200,63 +209,38 @@ def evaluate(model, loader, criterion, device):
     auc = roc_auc_score(all_targets, all_preds)
     auprc = average_precision_score(all_targets, all_preds)
     
-    return total_loss / len(loader), auc, auprc, all_preds, all_targets
+    return total_loss / len(loader), auc, auprc
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--lr", type=float, default=5e-4)
-    parser.add_argument("--dropout", type=float, default=0.5)
-    parser.add_argument("--hidden_dim", type=int, default=128)
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--lr", type=float, default=2e-4) # Lower LR for Attention
+    parser.add_argument("--dropout", type=float, default=0.3)
+    parser.add_argument("--embed_dim", type=int, default=64)
+    parser.add_argument("--num_heads", type=int, default=4)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--pca_components", type=int, default=64, help="Number of PCA components for text. 0 to disable.")
+    parser.add_argument("--pca_components", type=int, default=0, help="PCA for text (0=disable)")
     args = parser.parse_args()
 
-    # --- MLflow Safety Check ---
-    if "MLFLOW_RUN_ID" in os.environ:
-        logger.warning(f"Found MLFLOW_RUN_ID in env: {os.environ['MLFLOW_RUN_ID']}. Clearing it.")
-        del os.environ["MLFLOW_RUN_ID"]
-    
-    if mlflow.active_run():
-        logger.warning(f"Ending active run: {mlflow.active_run().info.run_id}")
-        mlflow.end_run()
+    # MLflow Robustness
+    if "MLFLOW_RUN_ID" in os.environ: del os.environ["MLFLOW_RUN_ID"]
+    if mlflow.active_run(): mlflow.end_run()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    mlflow.set_experiment("mimic_cardiorenal_attention_fusion")
     
-    mlflow.set_experiment("mimic_cardiorenal_late_fusion")
-    
-    loader = SeparateDataLoader()
-    ehr_data, txt_data, y, splits = loader.load_data()
+    loader = FusionDataLoader()
+    ehr_data, txt_data, y, splits, pca_explained = loader.load_data(pca_components=args.pca_components)
     
     train_idx = splits == 'train'
     val_idx = splits == 'val'
     test_idx = splits == 'test'
     
-    pca_explained = None
-    
-        # --- PCA Dimensionality Reduction (Text Only) ---
-        if args.pca_components > 0:
-            logger.info(f"Applying PCA to text embeddings (n={args.pca_components})...")
-            
-            # Fit ONLY on training data to prevent leakage
-            pca = PCA(n_components=args.pca_components)
-            pca.fit(txt_data[train_idx])
-            
-            pca_explained = np.sum(pca.explained_variance_ratio_)
-            logger.info(f"PCA Explain Variance Ratio: {pca_explained:.4f}")
-            # Note: Do not log to mlflow here; wait for start_run
-            
-            # Transform all
-            txt_data = pca.transform(txt_data)
-            
-            logger.info(f"New Text Dim: {txt_data.shape[1]}")
-        
-        train_ds = LateFusionDataset(ehr_data[train_idx], txt_data[train_idx], y[train_idx])
-    
-    val_ds = LateFusionDataset(ehr_data[val_idx], txt_data[val_idx], y[val_idx])
-    test_ds = LateFusionDataset(ehr_data[test_idx], txt_data[test_idx], y[test_idx])
+    train_ds = AttentionFusionDataset(ehr_data[train_idx], txt_data[train_idx], y[train_idx])
+    val_ds = AttentionFusionDataset(ehr_data[val_idx], txt_data[val_idx], y[val_idx])
+    test_ds = AttentionFusionDataset(ehr_data[test_idx], txt_data[test_idx], y[test_idx])
     
     train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=64)
@@ -265,32 +249,36 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device}")
     
-    model = LateFusionModel(
+    model = AttentionFusionModel(
         ehr_dim=ehr_data.shape[1],
         txt_dim=txt_data.shape[1],
-        hidden_dim=args.hidden_dim,
+        embed_dim=args.embed_dim,
+        num_heads=args.num_heads,
         dropout=args.dropout
     ).to(device)
     
     criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = get_linear_schedule_with_warmup(optimizer, 200, len(train_loader)*args.epochs)
+    
+    # Cosine Schedule with Warmup (better for attention)
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, 
+        num_warmup_steps=int(len(train_loader) * args.epochs * 0.1), # 10% warmup
+        num_training_steps=len(train_loader) * args.epochs
+    )
     
     best_auc = 0.0
     best_state = None
-    patience = 12
+    patience = 8
     no_improve = 0
     
-    # Use nested=True to prevent crashes if a run is already active
     with mlflow.start_run(nested=True):
         mlflow.log_params(vars(args))
-        
-        if pca_explained is not None:
-            mlflow.log_metric("pca_explained_variance", pca_explained)
+        if pca_explained: mlflow.log_metric("pca_explained", pca_explained)
         
         for epoch in range(args.epochs):
             train_loss = train_epoch(model, train_loader, criterion, optimizer, scheduler, device)
-            val_loss, val_auc, val_auprc, _, _ = evaluate(model, val_loader, criterion, device)
+            val_loss, val_auc, val_auprc = evaluate(model, val_loader, criterion, device)
             
             logger.info(f"Epoch {epoch+1} | Train: {train_loss:.4f} | Val AUC: {val_auc:.4f}")
             mlflow.log_metrics({"val_auc": val_auc, "train_loss": train_loss}, step=epoch)
@@ -305,15 +293,11 @@ def main():
             if no_improve >= patience:
                 logger.info("Early stopping")
                 break
-        
+                
         if best_state: model.load_state_dict(best_state)
-        
-        _, test_auc, test_auprc, preds, targets = evaluate(model, test_loader, criterion, device)
-        acc = accuracy_score(targets, (preds > 0.5).astype(int))
-        
+        _, test_auc, test_auprc = evaluate(model, test_loader, criterion, device)
         logger.info(f"Final Test AUC: {test_auc:.4f} | AUPRC: {test_auprc:.4f}")
-        mlflow.log_metrics({"test_auc": test_auc, "test_auprc": test_auprc, "test_acc": acc})
-        mlflow.pytorch.log_model(model, "model")
+        mlflow.log_metrics({"test_auc": test_auc, "test_auprc": test_auprc})
 
 if __name__ == "__main__":
     main()
