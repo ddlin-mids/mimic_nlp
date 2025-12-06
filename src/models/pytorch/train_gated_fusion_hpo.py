@@ -7,13 +7,11 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.decomposition import PCA
-from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, accuracy_score
+from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
 from transformers import get_cosine_schedule_with_warmup
 import mlflow
 import mlflow.pytorch
+import optuna
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -23,11 +21,6 @@ logger = logging.getLogger(__name__)
 # Gated Fusion Layer
 # -----------------------------------------------------------------------------
 class GatedMultimodalUnit(nn.Module):
-    """
-    Gated Multimodal Unit (GMU) for fusing two modalities.
-    It learns a gate z to weight the contribution of each modality.
-    h = z * h_A + (1-z) * h_B
-    """
     def __init__(self, dim, dropout=0.0):
         super().__init__()
         self.linear_z = nn.Linear(dim * 2, dim)
@@ -35,17 +28,9 @@ class GatedMultimodalUnit(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, x_a, x_b):
-        # x_a, x_b: (Batch, dim)
-        
-        # Concat to predict gate
         combined = torch.cat([x_a, x_b], dim=1)
         z = self.sigmoid(self.linear_z(combined))
-        
-        # Weighted sum
-        # Using z for A and (1-z) for B
-        # Often A is tanh(W_a x_a) but here we assume inputs are already projected/embedded
         h = z * x_a + (1 - z) * x_b
-        
         return self.dropout(h), z
 
 # -----------------------------------------------------------------------------
@@ -69,26 +54,19 @@ class GatedFusionDataset(Dataset):
 class GatedFusionModel(nn.Module):
     def __init__(self, ehr_dim, txt_dim, hidden_dim=64, dropout=0.3):
         super().__init__()
-        
-        # Project both to same hidden_dim
         self.ehr_proj = nn.Sequential(
             nn.Linear(ehr_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout)
         )
-        
         self.txt_proj = nn.Sequential(
             nn.Linear(txt_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout)
         )
-        
-        # Gating Mechanism
         self.gated_fusion = GatedMultimodalUnit(hidden_dim, dropout=dropout)
-        
-        # Classifier
         self.classifier = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
@@ -98,11 +76,8 @@ class GatedFusionModel(nn.Module):
     def forward(self, x_ehr, x_txt):
         h_ehr = self.ehr_proj(x_ehr)
         h_txt = self.txt_proj(x_txt)
-        
         fused, gate_vals = self.gated_fusion(h_ehr, h_txt)
-        
         logits = self.classifier(fused)
-        
         return logits, gate_vals
 
 # -----------------------------------------------------------------------------
@@ -125,55 +100,34 @@ class FusionDataLoader:
         splits = cohort['split'].values
         ids = cohort['hadm_id'].values
         
-        # 1. Structured Data (2D Summary)
         ehr_data = self._load_aligned_embeddings(self.structured_path, ids, mapping_file=self.structured_mapping_path)
         
-        # 2. Text Group
         disch = self._load_aligned_embeddings(self.discharge_path, ids)
         rad = self._load_radiology_embeddings(ids)
         txt_data = np.hstack([disch, rad])
         
-        pca_explained = None
-        if pca_components > 0:
-            logger.info(f"Applying PCA (n={pca_components}) to text...")
-            train_idx = splits == 'train'
-            pca = PCA(n_components=pca_components)
-            pca.fit(txt_data[train_idx])
-            pca_explained = np.sum(pca.explained_variance_ratio_)
-            txt_data = pca.transform(txt_data)
-            logger.info(f"PCA Variance: {pca_explained:.4f}")
+        # Simple Mean Imputation for Text NaN if any (though usually zeros)
+        # Assuming dense embeddings, zeros is fine for missingness
         
-        return ehr_data, txt_data, y, splits, pca_explained
+        return ehr_data, txt_data, y, splits
 
     def _load_aligned_embeddings(self, filepath, target_ids, mapping_file=None):
-        if not filepath.exists(): 
-            logger.warning(f"File not found: {filepath}")
-            return np.zeros((len(target_ids), 0))
-            
+        if not filepath.exists(): return np.zeros((len(target_ids), 0))
         data = np.load(filepath)
-        
         if mapping_file:
-            # Structured EHR case
             mapping = pd.read_csv(mapping_file)
             embeddings = data['embeddings']
-            
-            # Create ID map
             hid_to_idx = {}
             for _, row in mapping.iterrows():
                 parts = str(row['node_name']).split('_')
                 if len(parts) == 2: hid_to_idx[int(parts[1])] = row['row_idx']
-            
             dim = embeddings.shape[1]
             aligned = []
             for tid in target_ids:
-                if tid in hid_to_idx:
-                    aligned.append(embeddings[hid_to_idx[tid]])
-                else:
-                    aligned.append(np.zeros(dim))
+                if tid in hid_to_idx: aligned.append(embeddings[hid_to_idx[tid]])
+                else: aligned.append(np.zeros(dim))
             return np.array(aligned)
-            
         else:
-            # Notes case
             id_key = 'hadm_ids' if 'hadm_ids' in data else 'ids'
             source_ids = data[id_key]
             source_embeds = data['embeddings']
@@ -195,136 +149,126 @@ class FusionDataLoader:
             else: aligned.append(np.zeros(dim))
         return np.array(aligned)
 
+# -----------------------------------------------------------------------------
+# HPO Logic
+# -----------------------------------------------------------------------------
 def train_epoch(model, loader, criterion, optimizer, scheduler, device):
     model.train()
     total_loss = 0
     for x_ehr, x_txt, y in loader:
         x_ehr, x_txt, y = x_ehr.to(device), x_txt.to(device), y.to(device).unsqueeze(1)
-        
         optimizer.zero_grad()
         logits, _ = model(x_ehr, x_txt)
         loss = criterion(logits, y)
-        
         loss.backward()
         optimizer.step()
         scheduler.step()
-        
         total_loss += loss.item()
     return total_loss / len(loader)
 
 @torch.no_grad()
 def evaluate(model, loader, criterion, device):
     model.eval()
-    total_loss = 0
     all_preds = []
     all_targets = []
-    
     for x_ehr, x_txt, y in loader:
         x_ehr, x_txt, y = x_ehr.to(device), x_txt.to(device), y.to(device).unsqueeze(1)
-        
         logits, _ = model(x_ehr, x_txt)
-        loss = criterion(logits, y)
-        
         probs = torch.sigmoid(logits).cpu().numpy()
-        
-        total_loss += loss.item()
         all_preds.extend(probs)
         all_targets.extend(y.cpu().numpy())
-        
     all_preds = np.array(all_preds)
     all_targets = np.array(all_targets)
-    
     auc = roc_auc_score(all_targets, all_preds)
     auprc = average_precision_score(all_targets, all_preds)
     f1 = f1_score(all_targets, (all_preds > 0.5).astype(int))
-    
-    return total_loss / len(loader), auc, auprc, f1
+    return auc, auprc, f1
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--dropout", type=float, default=0.3)
-    parser.add_argument("--hidden_dim", type=int, default=64)
-    parser.add_argument("--weight_decay", type=float, default=0.01)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--pca_components", type=int, default=64)
-    args = parser.parse_args()
-
-    if "MLFLOW_RUN_ID" in os.environ: del os.environ["MLFLOW_RUN_ID"]
-    if mlflow.active_run(): mlflow.end_run()
-
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    mlflow.set_experiment("mimic_cardiorenal_gated_fusion")
+def objective(trial, ehr_data, txt_data, y, splits, pca_components=64, device="cuda"):
+    # Hyperparameters
+    params = {
+        "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
+        "dropout": trial.suggest_float("dropout", 0.1, 0.5),
+        "hidden_dim": trial.suggest_categorical("hidden_dim", [32, 64, 128, 256]),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True),
+        "batch_size": 64,
+        "epochs": 25 # Reduced for HPO speed
+    }
     
-    loader = FusionDataLoader()
-    ehr_data, txt_data, y, splits, pca_explained = loader.load_data(pca_components=args.pca_components)
+    # PCA inside objective (or cached outside)
+    # Caching outside is better for speed, but inside is cleaner for HPO if PCA dim is tuned.
+    # Here we fix PCA dim to 64 for speed as per previous experiments.
+    # txt_data is already loaded (full raw)
     
-    train_idx = splits == 'train'
-    val_idx = splits == 'val'
-    test_idx = splits == 'test'
+    # Apply PCA on the fly (it's fast for 11k rows)
+    from sklearn.decomposition import PCA
+    train_mask = splits == 'train'
+    pca = PCA(n_components=pca_components)
+    txt_reduced = pca.fit_transform(txt_data) # Fit on all is data leakage! 
+    # Correct: Fit on train, transform all
+    pca = PCA(n_components=pca_components)
+    pca.fit(txt_data[train_mask])
+    txt_reduced = pca.transform(txt_data)
     
-    train_ds = GatedFusionDataset(ehr_data[train_idx], txt_data[train_idx], y[train_idx])
-    val_ds = GatedFusionDataset(ehr_data[val_idx], txt_data[val_idx], y[val_idx])
-    test_ds = GatedFusionDataset(ehr_data[test_idx], txt_data[test_idx], y[test_idx])
+    train_ds = GatedFusionDataset(ehr_data[splits=='train'], txt_reduced[splits=='train'], y[splits=='train'])
+    val_ds = GatedFusionDataset(ehr_data[splits=='val'], txt_reduced[splits=='val'], y[splits=='val'])
     
-    train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=64)
-    test_loader = DataLoader(test_ds, batch_size=64)
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Device: {device}")
+    train_loader = DataLoader(train_ds, batch_size=params["batch_size"], shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=params["batch_size"])
     
     model = GatedFusionModel(
         ehr_dim=ehr_data.shape[1],
-        txt_dim=txt_data.shape[1],
-        hidden_dim=args.hidden_dim,
-        dropout=args.dropout
+        txt_dim=txt_reduced.shape[1],
+        hidden_dim=params["hidden_dim"],
+        dropout=params["dropout"]
     ).to(device)
     
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=params["lr"], weight_decay=params["weight_decay"])
+    scheduler = get_cosine_schedule_with_warmup(optimizer, 0, len(train_loader) * params["epochs"])
     
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer, 
-        num_warmup_steps=int(len(train_loader) * args.epochs * 0.1),
-        num_training_steps=len(train_loader) * args.epochs
-    )
+    best_val_auc = 0
     
-    best_auc = 0.0
-    best_state = None
-    patience = 8
-    no_improve = 0
-    
-    with mlflow.start_run(nested=True):
-        mlflow.set_tag("embedding_source", "transformer") # We know we just generated these
-        mlflow.set_tag("model_type", "gated_fusion")
-        mlflow.log_params(vars(args))
-        if pca_explained: mlflow.log_metric("pca_explained", pca_explained)
+    # Pruning
+    for epoch in range(params["epochs"]):
+        train_epoch(model, train_loader, criterion, optimizer, scheduler, device)
+        val_auc, _, _ = evaluate(model, val_loader, criterion, device)
         
-        for epoch in range(args.epochs):
-            train_loss = train_epoch(model, train_loader, criterion, optimizer, scheduler, device)
-            val_loss, val_auc, val_auprc, val_f1 = evaluate(model, val_loader, criterion, device)
+        trial.report(val_auc, epoch)
+        if trial.should_prune():
+            raise optuna.exceptions.TrialPruned()
             
-            logger.info(f"Epoch {epoch+1} | Train: {train_loss:.4f} | Val AUC: {val_auc:.4f}")
-            mlflow.log_metrics({"val_auc": val_auc, "train_loss": train_loss}, step=epoch)
-            
-            if val_auc > best_auc:
-                best_auc = val_auc
-                best_state = model.state_dict()
-                no_improve = 0
-            else:
-                no_improve += 1
-                
-            if no_improve >= patience:
-                logger.info("Early stopping")
-                break
-                
-        if best_state: model.load_state_dict(best_state)
-        _, test_auc, test_auprc, test_f1 = evaluate(model, test_loader, criterion, device)
-        logger.info(f"Final Test AUC: {test_auc:.4f} | AUPRC: {test_auprc:.4f} | F1: {test_f1:.4f}")
-        mlflow.log_metrics({"test_auc": test_auc, "test_auprc": test_auprc, "test_f1": test_f1})
+        best_val_auc = max(best_val_auc, val_auc)
+        
+    return best_val_auc
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--trials", type=int, default=30)
+    parser.add_argument("--pca", type=int, default=64)
+    args = parser.parse_args()
+    
+    mlflow.set_experiment("mimic_cardiorenal_gated_hpo")
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    loader = FusionDataLoader()
+    ehr_data, txt_data, y, splits = loader.load_data(pca_components=0) # Load raw, PCA inside
+    
+    study = optuna.create_study(direction="maximize")
+    
+    def obj_wrapper(trial):
+        return objective(trial, ehr_data, txt_data, y, splits, args.pca, device)
+    
+    study.optimize(obj_wrapper, n_trials=args.trials)
+    
+    logger.info(f"Best params: {study.best_params}")
+    logger.info(f"Best AUC: {study.best_value}")
+    
+    # Log best to MLflow
+    with mlflow.start_run(run_name="Best_HPO_Gated"):
+        mlflow.log_params(study.best_params)
+        mlflow.log_metric("best_val_auc", study.best_value)
 
 if __name__ == "__main__":
     main()

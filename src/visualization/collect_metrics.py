@@ -12,7 +12,10 @@ EXPERIMENTS = [
     "mimic_cardiorenal_readmission",      # HPO XGBoost
     "mimic_cardiorenal_readmission_pytorch", # Early Fusion
     "mimic_cardiorenal_late_fusion",       # Late Fusion
-    "mimic_cardiorenal_attention_fusion"   # Attention Fusion
+    "mimic_cardiorenal_attention_fusion",  # Attention Fusion
+    "mimic_cardiorenal_gated_fusion",      # Plan 2: Gated Fusion
+    "mimic_cardiorenal_gated_hpo",         # Plan 2: Gated Fusion HPO
+    "mimic_cardiorenal_temporal_attention" # Plan 1: Temporal Attention
 ]
 
 def get_best_run_metrics(experiment_name):
@@ -106,6 +109,24 @@ def main():
     if attn_metrics:
         attn_metrics["Model"] = "Attention Fusion"
         results.append(attn_metrics)
+
+    # 6. Gated Fusion (Plan 2)
+    gate_metrics = get_best_run_metrics("mimic_cardiorenal_gated_fusion")
+    if gate_metrics:
+        gate_metrics["Model"] = "Gated Fusion"
+        results.append(gate_metrics)
+
+    # 6b. Gated Fusion HPO
+    gate_hpo = get_best_run_metrics("mimic_cardiorenal_gated_hpo")
+    if gate_hpo:
+        gate_hpo["Model"] = "Gated Fusion (Optuna)"
+        results.append(gate_hpo)
+
+    # 7. Temporal Attention (Plan 1)
+    temp_metrics = get_best_run_metrics("mimic_cardiorenal_temporal_attention")
+    if temp_metrics:
+        temp_metrics["Model"] = "Temporal Attention"
+        results.append(temp_metrics)
 
     # Format
     df = pd.DataFrame(results)

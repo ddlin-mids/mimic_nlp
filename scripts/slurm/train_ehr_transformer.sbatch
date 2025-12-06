@@ -1,14 +1,14 @@
 #!/bin/bash
 #
-# Generate Structured EHR Embeddings (Full Sequence)
+# Train EHR Transformer
 #
 # Resources: GPU (A30), 8 CPUs, 64GB Memory.
 #
 # Usage:
-#   sbatch scripts/slurm/generate_structured_seq.sbatch
+#   sbatch scripts/slurm/train_ehr_transformer.sbatch
 #
 
-#SBATCH --job-name=gen-ehr-seq
+#SBATCH --job-name=ehr-trans
 #SBATCH --partition=free-gpu
 #SBATCH --gres=gpu:A30:1
 #SBATCH --nodes=1
@@ -16,7 +16,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=02:00:00
-#SBATCH --output=logs/slurm/gen_ehr_seq_%j.log
+#SBATCH --output=logs/slurm/ehr_trans_%j.log
 
 set -euo pipefail
 
@@ -25,26 +25,25 @@ export PYTHONUNBUFFERED=1
 echo "===================================================================="
 echo "Job Started: $(date)"
 echo "Node: $(hostname)"
-echo "Script: ehr/train_ehr_encoder.py"
+echo "Script: ehr/train_ehr_transformer.py"
 echo "===================================================================="
 
 cd "$SLURM_SUBMIT_DIR"
 
-# Paths match original preprocessing
 SEQ_DATA="data/interim/ehr_long_los/ehr_preprocessed_seq_by_day_cat_embedding.pkl"
 COHORT="data/interim/readmit_analysis/long_los_cohort.csv"
-SAVE_DIR="data/interim/ehr_long_los/embeddings"
+SAVE_DIR="data/interim/ehr_long_los/embeddings_transformer"
 
-echo ">>> Generating Sequential Embeddings..."
-uv run python ehr/train_ehr_encoder.py \
+echo ">>> Training EHR Transformer..."
+uv run python ehr/train_ehr_transformer.py \
     --input_path "$SEQ_DATA" \
     --cohort_path "$COHORT" \
     --save_dir "$SAVE_DIR" \
     --hidden_dim 128 \
-    --batch_size 64 \
-    --epochs 5 \
-    --max_len 100 \
-    --model_type gru
+    --num_layers 2 \
+    --num_heads 4 \
+    --epochs 10 \
+    --max_len 100
 
 echo "===================================================================="
 echo "Job Completed: $(date)"
