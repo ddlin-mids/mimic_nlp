@@ -236,25 +236,23 @@ def main():
     
     pca_explained = None
     
-        # --- PCA Dimensionality Reduction (Text Only) ---
-        if args.pca_components > 0:
-            logger.info(f"Applying PCA to text embeddings (n={args.pca_components})...")
-            
-            # Fit ONLY on training data to prevent leakage
-            pca = PCA(n_components=args.pca_components)
-            pca.fit(txt_data[train_idx])
-            
-            pca_explained = np.sum(pca.explained_variance_ratio_)
-            logger.info(f"PCA Explain Variance Ratio: {pca_explained:.4f}")
-            # Note: Do not log to mlflow here; wait for start_run
-            
-            # Transform all
-            txt_data = pca.transform(txt_data)
-            
-            logger.info(f"New Text Dim: {txt_data.shape[1]}")
+    # --- PCA Dimensionality Reduction (Text Only) ---
+    if args.pca_components > 0:
+        logger.info(f"Applying PCA to text embeddings (n={args.pca_components})...")
         
-        train_ds = LateFusionDataset(ehr_data[train_idx], txt_data[train_idx], y[train_idx])
+        # Fit ONLY on training data to prevent leakage
+        pca = PCA(n_components=args.pca_components)
+        pca.fit(txt_data[train_idx])
+        
+        pca_explained = np.sum(pca.explained_variance_ratio_)
+        logger.info(f"PCA Explain Variance Ratio: {pca_explained:.4f}")
+        
+        # Transform all
+        txt_data = pca.transform(txt_data)
+        
+        logger.info(f"New Text Dim: {txt_data.shape[1]}")
     
+    train_ds = LateFusionDataset(ehr_data[train_idx], txt_data[train_idx], y[train_idx])
     val_ds = LateFusionDataset(ehr_data[val_idx], txt_data[val_idx], y[val_idx])
     test_ds = LateFusionDataset(ehr_data[test_idx], txt_data[test_idx], y[test_idx])
     
@@ -310,9 +308,10 @@ def main():
         
         _, test_auc, test_auprc, preds, targets = evaluate(model, test_loader, criterion, device)
         acc = accuracy_score(targets, (preds > 0.5).astype(int))
+        f1 = f1_score(targets, (preds > 0.5).astype(int))
         
-        logger.info(f"Final Test AUC: {test_auc:.4f} | AUPRC: {test_auprc:.4f}")
-        mlflow.log_metrics({"test_auc": test_auc, "test_auprc": test_auprc, "test_acc": acc})
+        logger.info(f"Final Test AUC: {test_auc:.4f} | AUPRC: {test_auprc:.4f} | F1: {f1:.4f}")
+        mlflow.log_metrics({"test_auc": test_auc, "test_auprc": test_auprc, "test_acc": acc, "test_f1": f1})
         mlflow.pytorch.log_model(model, "model")
 
 if __name__ == "__main__":

@@ -172,6 +172,9 @@ class EHREncoder(nn.Module):
             packed_out, (hidden, cell) = self.rnn(packed)
         else:
             packed_out, hidden = self.rnn(packed)
+            
+        # Unpack to get full sequence (batch, max_len, hidden_dim)
+        output_seq, _ = pad_packed_sequence(packed_out, batch_first=True)
         
         # hidden: (num_layers, batch, hidden_dim)
         final_embedding = hidden[-1]
@@ -179,7 +182,7 @@ class EHREncoder(nn.Module):
         # Classify
         logits = self.classifier(final_embedding)
         
-        return logits.squeeze(1), final_embedding
+        return logits.squeeze(1), final_embedding, output_seq
 
 # -----------------------------------------------------------------------------
 # Utils
@@ -337,7 +340,7 @@ def train_model(args):
             feats, lens, lbls = feats.to(device), lens.to(device), lbls.to(device)
             
             optimizer.zero_grad()
-            logits, _ = model(feats, lens)
+            logits, _, _ = model(feats, lens)
             loss = criterion(logits, lbls)
             loss.backward()
             optimizer.step()
@@ -350,7 +353,7 @@ def train_model(args):
         with torch.no_grad():
             for feats, lens, lbls, _ in val_loader:
                 feats, lens, lbls = feats.to(device), lens.to(device), lbls.to(device)
-                logits, _ = model(feats, lens)
+                logits, _, _ = model(feats, lens)
                 probs = torch.sigmoid(logits)
                 val_preds.extend(probs.cpu().numpy())
                 val_targets.extend(lbls.cpu().numpy())
@@ -372,20 +375,43 @@ def train_model(args):
     all_loader = DataLoader(full_ds, batch_size=args.batch_size * 2, shuffle=False, collate_fn=collate_fn, num_workers=4)
     
     all_embeddings = []
+    all_seqs = []
     all_node_names = []
     
     with torch.no_grad():
         for feats, lens, _, nodes in tqdm(all_loader, desc="Inferencing"):
             feats, lens = feats.to(device), lens.to(device)
-            _, embeddings = model(feats, lens)
+            _, embeddings, seqs = model(feats, lens)
+            
             all_embeddings.append(embeddings.cpu().numpy())
+            
+            # Handle sequence padding to fixed max_len for saving
+            # seqs: (Batch, BatchMaxLen, Hidden)
+            # We want (Batch, args.max_len, Hidden)
+            curr_seq = seqs.cpu().numpy()
+            batch_s, time_s, dim_s = curr_seq.shape
+            
+            if time_s < args.max_len:
+                # Pad
+                pad_width = ((0,0), (0, args.max_len - time_s), (0,0))
+                curr_seq = np.pad(curr_seq, pad_width, mode='constant', constant_values=0)
+            elif time_s > args.max_len:
+                # Truncate (shouldn't happen given input clipping)
+                curr_seq = curr_seq[:, :args.max_len, :]
+                
+            all_seqs.append(curr_seq)
             all_node_names.extend(nodes)
             
     final_embeddings = np.concatenate(all_embeddings, axis=0)
+    final_seqs = np.concatenate(all_seqs, axis=0)
     
     out_npz = os.path.join(args.save_dir, "structured_ehr_embeddings.npz")
     np.savez(out_npz, embeddings=final_embeddings, node_names=all_node_names)
     logger.info(f"Saved embeddings to {out_npz}")
+    
+    out_seq_npz = os.path.join(args.save_dir, "structured_ehr_embeddings_seq.npz")
+    np.savez(out_seq_npz, embeddings=final_seqs, node_names=all_node_names)
+    logger.info(f"Saved sequential embeddings to {out_seq_npz}")
     
     out_map = os.path.join(args.save_dir, "structured_ehr_mapping.csv")
     map_df = pd.DataFrame({"node_name": all_node_names, "row_idx": range(len(all_node_names))})

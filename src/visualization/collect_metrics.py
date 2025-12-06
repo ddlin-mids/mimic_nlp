@@ -11,27 +11,36 @@ EXPERIMENTS = [
     "mimic_cardiorenal_ablation",
     "mimic_cardiorenal_readmission",      # HPO XGBoost
     "mimic_cardiorenal_readmission_pytorch", # Early Fusion
-    "mimic_cardiorenal_late_fusion"       # Late Fusion
+    "mimic_cardiorenal_late_fusion",       # Late Fusion
+    "mimic_cardiorenal_attention_fusion"   # Attention Fusion
 ]
 
 def get_best_run_metrics(experiment_name):
     try:
+        logger.info(f"Checking experiment: {experiment_name}")
         exp = mlflow.get_experiment_by_name(experiment_name)
         if not exp:
             logger.warning(f"Experiment {experiment_name} not found.")
             return None
         
-        # Search for runs, sort by test_auc desc
+        # Search for top 5 runs by AUC
         runs = mlflow.search_runs(
             experiment_ids=[exp.experiment_id],
-            order_by=["metrics.test_auc DESC"]
+            order_by=["metrics.test_auc DESC", "attribute.start_time DESC"],
+            max_results=5
         )
         
         if runs.empty:
             logger.warning(f"No runs found for {experiment_name}")
             return None
             
+        # Prefer run with F1 score if available, otherwise take top
         best_run = runs.iloc[0]
+        for _, run in runs.iterrows():
+             # Check if test_f1 is not NaN
+             if "metrics.test_f1" in run and not pd.isna(run["metrics.test_f1"]):
+                 best_run = run
+                 break
         
         # Extract metrics
         metrics = {
@@ -91,6 +100,12 @@ def main():
     if lf_metrics:
         lf_metrics["Model"] = "Late Fusion (2-Tower)"
         results.append(lf_metrics)
+
+    # 5. Attention Fusion
+    attn_metrics = get_best_run_metrics("mimic_cardiorenal_attention_fusion")
+    if attn_metrics:
+        attn_metrics["Model"] = "Attention Fusion"
+        results.append(attn_metrics)
 
     # Format
     df = pd.DataFrame(results)
