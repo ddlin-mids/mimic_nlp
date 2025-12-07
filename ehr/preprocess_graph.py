@@ -9,6 +9,7 @@ from torch_geometric.data import Data
 from sklearn.neighbors import NearestNeighbors
 from sklearn.feature_extraction.text import TfidfTransformer
 from tqdm import tqdm
+from collections import defaultdict
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -49,14 +50,59 @@ def _symmetrize_edges(source_nodes, target_nodes, edge_weights):
     )
 
 
+def _load_aligned_embeddings(filepath, target_ids, agg_mode='last'):
+    """Load and align embeddings from .npz file."""
+    if not os.path.exists(filepath):
+        logger.warning(f"File not found: {filepath}")
+        return None
+    
+    data = np.load(filepath)
+    # Handle key variations
+    id_key = 'hadm_ids' if 'hadm_ids' in data else 'ids'
+    embed_key = 'embeddings'
+    
+    if id_key not in data or embed_key not in data:
+        logger.warning(f"Keys {id_key}/{embed_key} not found in {filepath}")
+        return None
+
+    source_ids = data[id_key]
+    source_embeds = data[embed_key]
+    
+    # Handle multi-row per hadm_id (e.g. radiology)
+    id_map = defaultdict(list)
+    for k, v in zip(source_ids, source_embeds):
+        # normalize ID to int
+        try:
+            k_int = int(k)
+        except:
+            k_int = k
+        id_map[k_int].append(v)
+        
+    dim = source_embeds.shape[1]
+    aligned = []
+    
+    for tid in target_ids:
+        if tid in id_map:
+            # Average multiple embeddings if present
+            aligned.append(np.mean(id_map[tid], axis=0))
+        else:
+            aligned.append(np.zeros(dim))
+            
+    return np.array(aligned)
+
 def main(args):
+    # Load cohort first as it's often needed for ID verification
+    logger.info(f"Loading cohort from {args.cohort_path}...")
+    cohort = pd.read_csv(args.cohort_path)
+    cohort["node_name"] = cohort["subject_id"].astype(str) + "_" + cohort["hadm_id"].astype(str)
+
     # 1. Load Data or Embeddings
     if args.use_embeddings and os.path.exists(args.use_embeddings):
         logger.info(f"Loading embeddings from {args.use_embeddings}...")
         emb_data = np.load(args.use_embeddings)
-        X_knn = emb_data['embeddings']
+        X_ehr = emb_data['embeddings']
         node_names_emb = emb_data['node_names']
-        logger.info(f"Loaded embeddings shape: {X_knn.shape}")
+        logger.info(f"Loaded EHR embeddings shape: {X_ehr.shape}")
         
         # Extract hadm_ids from node_names (format: subject_hadm)
         target_ids = []
@@ -67,6 +113,46 @@ def main(args):
                 target_ids.append(-1)
         target_ids = np.array(target_ids)
         
+        # Load Text Embeddings if provided
+        X_text = None
+        if args.text_path:
+            logger.info(f"Loading text embeddings from base {args.text_path}...")
+            
+            disch_path = os.path.join(args.text_path, "discharge_summary.npz")
+            rad_path = os.path.join(args.text_path, "radiology_report.npz")
+            
+            # If not found, maybe they are in 'embeddings/notes/'
+            if not os.path.exists(disch_path):
+                 disch_path = os.path.join(args.text_path, "embeddings/notes/discharge_summary.npz")
+                 rad_path = os.path.join(args.text_path, "embeddings/notes/radiology_report.npz")
+
+            logger.info(f"Discharge path: {disch_path}")
+            logger.info(f"Radiology path: {rad_path}")
+
+            X_disch = _load_aligned_embeddings(disch_path, target_ids)
+            X_rad = _load_aligned_embeddings(rad_path, target_ids)
+            
+            to_concat = []
+            if X_disch is not None: to_concat.append(X_disch)
+            if X_rad is not None: to_concat.append(X_rad)
+            
+            if to_concat:
+                X_text = np.hstack(to_concat)
+                logger.info(f"Loaded Text embeddings shape: {X_text.shape}")
+            else:
+                logger.warning("No text embeddings found.")
+
+        # Concatenate EHR + Text
+        if X_text is not None:
+            # Check dimensions compatibility
+            if X_text.shape[0] != X_ehr.shape[0]:
+                logger.error(f"Mismatch in rows: EHR {X_ehr.shape[0]} vs Text {X_text.shape[0]}")
+                return
+            X_knn = np.hstack([X_ehr, X_text])
+            logger.info(f"Combined Multimodal Embeddings: {X_knn.shape}")
+        else:
+            X_knn = X_ehr
+
         # Use embeddings for KNN
         # Normalize for cosine metric
         norms = np.linalg.norm(X_knn, axis=1, keepdims=True)
@@ -94,9 +180,7 @@ def main(args):
         
         grp = df.groupby('hadm_id')[feature_cols].sum()
         
-        logger.info(f"Loading cohort from {args.cohort_path}...")
-        cohort = pd.read_csv(args.cohort_path)
-        cohort["node_name"] = cohort["subject_id"].astype(str) + "_" + cohort["hadm_id"].astype(str)
+        # Cohort already loaded at top
         
         mapping_df = None
         if os.path.exists(args.mapping_path):
@@ -177,6 +261,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", type=str, default="data/interim/ehr_long_los/graph")
     parser.add_argument("--k", type=int, default=15, help="Number of neighbors")
     parser.add_argument("--use_embeddings", type=str, default=None, help="Path to embeddings .npz to use for graph construction")
+    parser.add_argument("--text_path", type=str, default=None, help="Base path for text embeddings (optional)")
     
     args = parser.parse_args()
     main(args)

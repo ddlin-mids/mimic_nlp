@@ -42,7 +42,7 @@ else
 fi
 
 # 3. Build Command
-PANDOC_CMD=(pandoc "$INPUT" -o "$OUTPUT" --pdf-engine=pdflatex --variable geometry:margin=1in --variable fontsize=11pt --highlight-style=pygments)
+PANDOC_CMD=(pandoc "$INPUT" -o "$OUTPUT" --pdf-engine=xelatex --variable geometry:margin=1in --variable fontsize=11pt --highlight-style=pygments)
 
 if [ "$USE_FILTER" = true ]; then
     echo "Using mermaid-filter for diagrams..."
@@ -57,16 +57,26 @@ echo "Running: ${PANDOC_CMD[*]}"
 if "${PANDOC_CMD[@]}"; then
     echo "✅ Success! Report knitted to: $OUTPUT"
 else
-    echo "❌ Build failed."
+    echo "❌ PDF Build failed (likely due to missing or broken TeX environment)."
+    
+    # Fallback to HTML
+    OUTPUT_HTML="${OUTPUT%.pdf}.html"
+    echo "Attempting to build HTML report as fallback..."
+    
+    # Basic HTML command
+    PANDOC_HTML_CMD=(pandoc "$INPUT" -o "$OUTPUT_HTML" --standalone --toc --metadata title="Final Project Report")
+    
     if [ "$USE_FILTER" = true ]; then
-        echo "Retrying without mermaid-filter (diagrams will be code blocks)..."
-        if pandoc "$INPUT" -o "$OUTPUT" --pdf-engine=pdflatex --variable geometry:margin=1in --variable fontsize=11pt; then
-             echo "⚠️  Success (partial): PDF built but diagrams are code blocks. See $OUTPUT"
-        else
-             echo "❌ Build failed again."
-             exit 1
-        fi
+        PANDOC_HTML_CMD+=(-F "$FILTER_CMD")
+    fi
+    
+    echo "Running: ${PANDOC_HTML_CMD[*]}"
+    if "${PANDOC_HTML_CMD[@]}"; then
+        echo "⚠️  PDF generation failed, but HTML report was generated successfully."
+        echo "📄 HTML Report: $OUTPUT_HTML"
+        echo "👉 You can open this HTML file in a browser and 'Print to PDF' to get your PDF."
     else
+        echo "❌ HTML Build also failed."
         exit 1
     fi
 fi

@@ -160,6 +160,7 @@ Performance on the held-out Test Set (N=1,569), using train+val for tuning and a
 | Gated Fusion (Optuna)     | Time-Trans         | Yes          | Gated (GMU)      | 0.6316     | **0.3613** | 0.2947  |
 | Temporal Attention        | Time-Trans         | Yes          | Cross-Attention  | 0.6307     | 0.3464     | 0.1801  |
 | XGBoost (Fusion, Transf.) | Time-Trans         | Yes          | Concatenation    | 0.6297     | 0.3577     | 0.2564  |
+| GNN (GraphSAGE)           | Time-Trans         | Yes          | Graph Conv       | 0.6239     | 0.3351     | 0.0000* |
 | Early Fusion (MLP)        | Time-GRU           | Yes          | MLP (Concat)     | 0.6116     | 0.3271     | 0.3519  |
 | Late Fusion (2-Tower)     | Time-GRU           | Yes          | Two-Tower        | 0.6051     | 0.3217     | 0.3142  |
 | XGBoost (Text Only)       | None               | Yes          | None             | 0.6145     | 0.3264     | 0.00    |
@@ -222,7 +223,7 @@ The new **Early Fusion (MLP HPO)** model—an Optuna-tuned PyTorch MLP over [Tra
 Despite extensive HPO, neither **Transformer+XGBoost** nor the neural fusion models consistently surpass the GRU+XGBoost baseline on test AUC. The best Transformer+XGBoost configuration reaches ~0.625 AUC, suggesting that the tree model is already well aligned with the GRU embedding geometry and that the limiting factor is likely **data/label noise** rather than model capacity.
 
 ### 5.3 Additional Architectural Explorations
-We also explored **Graph Neural Networks (GraphSAGE)**, constructing a patient-similarity graph based on medical history. However, preliminary experiments showed instability in training and no significant gain over the Gated Fusion approach, leading us to prioritize the Gated and MLP fusion architectures. Additionally, while the **Transformer Encoder** proved superior for feature extraction, its full integration into the fusion pipeline via end-to-end training (jointly optimizing encoder and fusion head) remains a key area for future work, with the potential to combine the best of both worlds: superior temporal encoding and adaptive multimodal gating.
+We explored **Graph Neural Networks (GraphSAGE)** by constructing a k-nearest neighbor (k=15) patient similarity graph based on multimodal features (Transformer EHR + Text). The optimized GNN achieved a Test AUROC of **0.6239** and AUPRC of **0.3351**, performing comparably to the Transformer-based XGBoost model but slightly below the Gated Fusion approach. The model's low F1 score (0.00 at default threshold) indicates conservative calibration due to class imbalance, similar to the XGBoost baseline. While the GNN effectively captures patient similarity, the lack of explicit temporal modeling within the graph structure likely limited its performance compared to our temporally-aware fusion architectures. Additionally, while the **Transformer Encoder** proved superior for feature extraction, its full integration into the fusion pipeline via end-to-end training (jointly optimizing encoder and fusion head) remains a key area for future work.
 
 ### 5.4 Model Selection & Deployment Recommendations
 
