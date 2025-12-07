@@ -276,3 +276,4 @@ wandb/
 runs/
 logs/
 *.log
+node_modules/

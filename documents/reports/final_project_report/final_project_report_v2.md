@@ -69,30 +69,79 @@ We treated the admission as two parallel data streams ending at discharge ($t=0$
 *   **Refinement:** We applied PCA to reduce text embeddings to 64 dimensions. This was a crucial step; preliminary experiments showed that raw 768-dim embeddings caused massive overfitting in the fusion layer due to the "curse of dimensionality."
 
 ### 4.3 Models & Architectures
-We designed experiments to test our hypothesis that **fusion requires regulation**.
+We designed experiments to test our hypothesis that **fusion requires regulation**. Figure 1 shows the overall multimodal pipeline and Figure 2 compares the four fusion strategies.
 
+**Figure 1: Overall Multimodal Pipeline**
 ```mermaid
-graph LR
-    A[EHR Sequence] --> B(Time-GRU / Trans);
-    C[Clinical Text] --> D(ModernBERT);
-    B --> E[Fusion Layer];
-    D --> E;
-    E --> F[Classifier];
+graph TB
+    subgraph Input["Input Data (t ≤ 0)"]
+        A[Labs / Meds / Dx<br/>Daily Sequences]
+        B[Discharge Summary<br/>Radiology Reports]
+        C[Demographics<br/>Age, Gender, Race]
+    end
+    
+    subgraph Encoders
+        D[Temporal Encoder<br/>GRU or Transformer<br/>→ 128-dim]
+        E[ModernBERT<br/>8k context<br/>→ 768-dim]
+        F[One-Hot + Scale<br/>→ ~20-dim]
+    end
+    
+    G[PCA 768→64]
+    H[Fusion Strategy<br/>See Figure 2]
+    I[Classifier<br/>→ P readmit]
+    
+    A --> D
+    B --> E
+    C --> F
+    E --> G
+    D --> H
+    F --> H
+    G --> H
+    H --> I
 ```
 
-1.  **XGBoost (Baseline):** Gradient Boosted Trees trained on flattened temporal features.
-    *   *Hyperparameters:* Depth=4, LR=0.0087, Subsamp=0.88, Estimators=1000.
-2.  **Early Fusion (MLP):** Concatenation of [Structured, Text] vectors fed into a Multi-Layer Perceptron.
-    *   *Layer:* `Linear(192, 64)` -> `ReLU` -> `Dropout(0.3)` -> `Linear(64, 1)`.
-3.  **Late Fusion (Two-Tower):** Independent networks for each modality.
-    *   *Structured Tower:* `Linear` -> `BatchNorm` -> `ReLU` -> `Dropout(0.25)`.
-    *   *Text Tower:* `Linear` -> `BatchNorm` -> `ReLU` -> `Dropout(0.5)`.
-    *   *Fusion:* Summation at logit level.
-4.  **Gated Fusion (Proposed):** A **Gated Multimodal Unit (GMU)**.
-    *   *Architecture:* Projects both modalities to 64-dim. Learns a sigmoid gate $z = \sigma(W_z \cdot [h_{struct}, h_{text}] + b_z)$.
-    *   *Fusion:* $h_{final} = z \cdot h_{struct} + (1-z) \cdot h_{text}$.
-    *   *Classifier:* `Linear(64, 32)` -> `ReLU` -> `Linear(32, 1)`.
-    *   *Optimizer:* AdamW (LR=2e-4, WeightDecay=0.01).
+**Figure 2: Fusion Strategy Comparison**
+```mermaid
+graph LR
+    subgraph early["(a) Early Fusion"]
+        E1[h_struct] --> E3[Concat]
+        E2[h_text] --> E3
+        E3 --> E4[MLP]
+        E4 --> E5[logit]
+    end
+    
+    subgraph late["(b) Late Fusion"]
+        L1[h_struct] --> L3[Tower_S]
+        L2[h_text] --> L4[Tower_T]
+        L3 --> L5[logit_s]
+        L4 --> L6[logit_t]
+        L5 --> L7[Sum]
+        L6 --> L7
+    end
+    
+    subgraph gated["(c) Gated Fusion ★"]
+        G1[h_struct] --> G3[Concat]
+        G2[h_text] --> G3
+        G3 --> G4["σ(W·h)"]
+        G4 --> G5["gate z"]
+        G1 --> G6["z·h_s"]
+        G2 --> G7["(1-z)·h_t"]
+        G6 --> G8[Sum]
+        G7 --> G8
+    end
+    
+    subgraph attn["(d) Temporal Attention"]
+        A1[h_struct] --> A3[Cross-Attn]
+        A2[h_text] --> A3
+        A3 --> A4[Weighted Sum]
+    end
+```
+
+1.  **XGBoost (Baseline):** Gradient Boosted Trees on flattened temporal features. *Hyperparameters:* Depth=4, LR=0.0087, Subsamp=0.88, Estimators=1000.
+2.  **Early Fusion (MLP):** Concatenation `[h_struct, h_text]` → `Linear(192,64)` → `ReLU` → `Dropout(0.3)` → `Linear(64,1)`.
+3.  **Late Fusion (Two-Tower):** Independent towers per modality; fusion via logit summation. Structured: `Dropout(0.25)`, Text: `Dropout(0.5)`.
+4.  **Gated Fusion (Proposed):** Learns gate $z = \sigma(W_z \cdot [h_s, h_t] + b_z)$; fuses as $h_{final} = z \cdot h_s + (1-z) \cdot h_t$. Classifier: `Linear(64,32)` → `ReLU` → `Linear(32,1)`. Optimizer: AdamW (LR=2e-4, WeightDecay=0.01).
+5.  **Temporal Attention:** Cross-attention between structured sequence and text embedding, allowing dynamic weighting across time steps.
 
 ### 4.4 Metrics
 We report **AUROC** (Area Under Receiver Operating Characteristic) as the primary metric for discrimination. Given the class imbalance (24.5% readmission rate), we also report **AUPRC** (Area Under Precision-Recall Curve) and **F1 Score** to assess the model's practical utility in identifying positive cases.
@@ -118,6 +167,39 @@ Performance on the held-out Test Set (N=1,569), using train+val for tuning and a
 
 *\*Note: XGBoost models default to a 0.5 threshold, resulting in 0 F1 due to conservative calibration. Neural models are better calibrated and tuned via validation.*
 
+**Figure 3: Top Model Performance Comparison**
+```
+Test AUROC (higher is better)
+──────────────────────────────────────────────────────────────
+XGBoost (GRU)           ████████████████████████████████ 0.641
+Gated Fusion (GRU)      ███████████████████████████████▉ 0.638
+Early Fusion MLP (HPO)  ███████████████████████████████▉ 0.638
+XGBoost (Fusion)        ███████████████████████████████▊ 0.637
+Gated Fusion (Optuna)   ███████████████████████████████▌ 0.632
+Baseline (Static LR)    ██████████████████████████▊      0.536
+──────────────────────────────────────────────────────────────
+
+Test AUPRC (higher is better, random baseline ≈ 0.245)
+──────────────────────────────────────────────────────────────
+Gated Fusion (Optuna)   ████████████████████████████████ 0.361
+XGBoost (Fusion, Trans) ███████████████████████████████▌ 0.358
+Early Fusion MLP (HPO)  ███████████████████████████████  0.354
+Gated Fusion (GRU)      ██████████████████████████████▊  0.350
+XGBoost (GRU)           █████████████████████████████▊   0.341
+Baseline (Static LR)    ██████████████████████▋          0.258
+──────────────────────────────────────────────────────────────
+
+Test F1 Score (higher is better)
+──────────────────────────────────────────────────────────────
+Early Fusion MLP (HPO)  ████████████████████████████████ 0.347
+Early Fusion (MLP)      ████████████████████████████████ 0.352
+Late Fusion (2-Tower)   ████████████████████████████▊    0.314
+Gated Fusion (Optuna)   ██████████████████████████▋      0.295
+Gated Fusion (GRU)      █████████████████████████▊       0.289
+XGBoost (GRU)           ▏                                0.000*
+──────────────────────────────────────────────────────────────
+```
+
 **Standalone Encoder Quality**
 
 - The **Transformer Encoder** trained on structured EHR trajectories still achieves a **validation AUROC of 0.6583**, outperforming the GRU encoder (0.651). This confirms that self-attention is a stronger temporal feature extractor for long clinical stays.
@@ -128,7 +210,7 @@ Performance on the held-out Test Set (N=1,569), using train+val for tuning and a
 Our analysis confirms that the **Transformer Encoder** produces higher-quality structured embeddings than the GRU baseline, as measured by validation AUROC (0.658 vs 0.651). The attention mechanism captures long-range dependencies in 15+ day admissions more effectively than recurrent architectures.
 
 **The Fusion Paradox (revisited):**  
-As shown in the t-SNE visualization (**Fig 1**, see `results/figures/embeddings_tsne.png`), text embeddings form a diffuse, high-variance cloud compared to the more compact structured EHR embeddings. Naive concatenation (Early Fusion with GRU) degrades performance to 0.611 AUROC because the model overfits to noisy text dimensions. This “Fusion Paradox” persists even when the structured side is improved with Transformer embeddings.
+As shown in the t-SNE visualization (**Fig 4**, see `results/figures/embeddings_tsne.png`), text embeddings form a diffuse, high-variance cloud compared to the more compact structured EHR embeddings. Naive concatenation (Early Fusion with GRU) degrades performance to 0.611 AUROC because the model overfits to noisy text dimensions. This “Fusion Paradox” persists even when the structured side is improved with Transformer embeddings.
 
 **Gating and HPO Partially Resolve the Paradox:**  
 The original **Gated Fusion** model with GRU EHR remains a strong multimodal baseline (0.638 AUROC, 0.3495 AUPRC, F1 0.2887), confirming that an explicit gate $z$ can learn *when* to trust text. With Transformer embeddings and Optuna HPO, **Gated Fusion (Optuna)** reaches 0.6316 AUROC and the best AUPRC in the suite (0.3613), with F1 0.2947. This suggests that gating still mitigates text noise in the Transformer regime, though gains over simpler fusion are incremental on this dataset.
@@ -141,6 +223,32 @@ Despite extensive HPO, neither **Transformer+XGBoost** nor the neural fusion mod
 
 ### 5.3 Additional Architectural Explorations
 We also explored **Graph Neural Networks (GraphSAGE)**, constructing a patient-similarity graph based on medical history. However, preliminary experiments showed instability in training and no significant gain over the Gated Fusion approach, leading us to prioritize the Gated and MLP fusion architectures. Additionally, while the **Transformer Encoder** proved superior for feature extraction, its full integration into the fusion pipeline via end-to-end training (jointly optimizing encoder and fusion head) remains a key area for future work, with the potential to combine the best of both worlds: superior temporal encoding and adaptive multimodal gating.
+
+### 5.4 Model Selection & Deployment Recommendations
+
+Given the close clustering of top models around AUROC ≈ 0.63–0.64, we view **operating point, calibration, and complexity** as more important than squeezing out another 0.001 of AUC.
+
+**Primary recommendations**
+
+- **Ranking / Triage (risk stratification lists):**  
+  - Use **XGBoost with GRU EHR embeddings** as the primary ranking model.  
+  - It is simple to deploy, fast at inference, and consistently delivers the best or near-best AUROC (0.6406) with stable behavior across ablations.
+
+- **High-recall alerting (who to flag for follow-up):**  
+  - Prefer **Early Fusion MLP (HPO, Transformer EHR + Text)** as the default neural candidate.  
+  - It nearly matches GRU+XGBoost and GRU Gated Fusion on AUROC (0.6378) but has the strongest F1 and robust AUPRC, making it attractive when recall on positives matters.
+  - For users who want an explicit gating mechanism, **GRU Gated Fusion** remains an excellent alternative with similar AUC and slightly lower but still strong F1.
+
+- **Interpretability-sensitive settings:**  
+  - Stick with **XGBoost (GRU EHR ± text)**, as tree-based models are easier to explain (feature importance, SHAP) and require no GPU at inference.
+
+**Operational notes**
+
+- All recommended models are now trained using a **train/val split for tuning** and evaluated once on a held-out **test** set. Hyperparameter sweeps are reproducible via MLflow-backed scripts (`train_fusion_hpo.py`, `train_fusion_pytorch_hpo.py`, `train_gated_fusion_hpo.py`).
+- Thresholds for neural models should be selected via validation curves (precision–recall) rather than defaulting to 0.5. For XGBoost, we recommend calibrating probabilities (e.g., Platt scaling or isotonic regression) before choosing an operating threshold.
+- In a real deployment, we would likely:
+  1. Use **GRU+XGBoost** to produce a ranked list of admissions by risk.
+  2. Overlay **Transformer MLP scores** for the top deciles to prioritize cases where multimodal text clearly shifts risk upward (e.g., concerning discharge language, poor social support).
 
 ## 6. Conclusion
 

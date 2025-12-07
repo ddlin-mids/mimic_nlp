@@ -63,16 +63,28 @@ def train_model(args):
     val_mask = torch.zeros(len(node_names), dtype=torch.bool).to(device)
     test_mask = torch.zeros(len(node_names), dtype=torch.bool).to(device)
     
+    match_count = 0
     for _, row in cohort.iterrows():
         name = row["node_name"]
         if name in node_to_idx:
             idx = node_to_idx[name]
-            y[idx] = float(row["readmitted_within_window"])
+            y[idx] = float(row["readmitted_within_window"]) 
             split = row.get("split", "train")
             if split == "train": train_mask[idx] = True
             elif split in ["val", "validation"]: val_mask[idx] = True
             elif split == "test": test_mask[idx] = True
+            match_count += 1
             
+    logger.info(f"Total Nodes: {len(node_names)}")
+    logger.info(f"Matched Cohort Entries: {match_count}")
+    logger.info(f"Train Size: {train_mask.sum().item()}")
+    logger.info(f"Val Size: {val_mask.sum().item()}")
+    logger.info(f"Test Size: {test_mask.sum().item()}")
+    
+    if train_mask.sum().item() == 0:
+        logger.error("Train mask is empty! Check cohort node_name matching.")
+        return
+
     model = GNNClassifier(x.size(1), args.hidden_dim, 1, args.dropout).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     criterion = torch.nn.BCEWithLogitsLoss()

@@ -50,45 +50,79 @@ def _symmetrize_edges(source_nodes, target_nodes, edge_weights):
 
 
 def main(args):
-    # 1. Load Data
-    logger.info(f"Loading features from {args.input_path}...")
-    with open(args.input_path, "rb") as f:
-        data_dict = pickle.load(f)
+    # 1. Load Data or Embeddings
+    if args.use_embeddings and os.path.exists(args.use_embeddings):
+        logger.info(f"Loading embeddings from {args.use_embeddings}...")
+        emb_data = np.load(args.use_embeddings)
+        X_knn = emb_data['embeddings']
+        node_names_emb = emb_data['node_names']
+        logger.info(f"Loaded embeddings shape: {X_knn.shape}")
         
-    df = data_dict['X']
-    
-    # 2. Aggregation (Bag of Words)
-    logger.info("Aggregating daily features to admission level...")
-    feature_cols = [c for c in df.columns if c not in [
-        'subject_id', 'hadm_id', 'admittime', 'dischtime', 'split', 'splits', 'date', 'node_name', 'target', 'readmitted_within_30days'
-    ]]
-    
-    grp = df.groupby('hadm_id')[feature_cols].sum()
-    
-    logger.info(f"Loading cohort from {args.cohort_path}...")
-    cohort = pd.read_csv(args.cohort_path)
-    cohort["node_name"] = cohort["subject_id"].astype(str) + "_" + cohort["hadm_id"].astype(str)
-    
-    mapping_df = None
-    if os.path.exists(args.mapping_path):
-        logger.info(f"Aligning to {args.mapping_path}...")
-        mapping_df = pd.read_csv(args.mapping_path)
-        mapping_df['hadm_id'] = mapping_df['node_name'].apply(lambda x: int(x.split('_')[1]))
-        target_ids = mapping_df['hadm_id'].values
-    else:
-        logger.warning("Mapping not found. Aligning to cohort file directly.")
-        target_ids = cohort['hadm_id'].values
+        # Extract hadm_ids from node_names (format: subject_hadm)
+        target_ids = []
+        for name in node_names_emb:
+            try:
+                target_ids.append(int(name.split('_')[1]))
+            except:
+                target_ids.append(-1)
+        target_ids = np.array(target_ids)
+        
+        # Use embeddings for KNN
+        # Normalize for cosine metric
+        norms = np.linalg.norm(X_knn, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        X_tfidf = X_knn / norms
+        
+        # Prepare mapping_df for later
+        mapping_df = pd.DataFrame({
+            'node_name': node_names_emb,
+            'hadm_id': target_ids
+        })
 
-    X_counts = grp.reindex(target_ids).fillna(0).values
-    logger.info(f"Feature Matrix Shape: {X_counts.shape}")
-    
-    # 3. TF-IDF
-    logger.info("Applying TF-IDF...")
-    tfidf = TfidfTransformer()
-    X_tfidf = tfidf.fit_transform(X_counts)
+    else:
+        logger.info(f"Loading features from {args.input_path}...")
+        with open(args.input_path, "rb") as f:
+            data_dict = pickle.load(f)
+            
+        df = data_dict['X']
+        
+        # 2. Aggregation (Bag of Words)
+        logger.info("Aggregating daily features to admission level...")
+        feature_cols = [c for c in df.columns if c not in [
+            'subject_id', 'hadm_id', 'admittime', 'dischtime', 'split', 'splits', 'date', 'node_name', 'target', 'readmitted_within_30days'
+        ]]
+        
+        grp = df.groupby('hadm_id')[feature_cols].sum()
+        
+        logger.info(f"Loading cohort from {args.cohort_path}...")
+        cohort = pd.read_csv(args.cohort_path)
+        cohort["node_name"] = cohort["subject_id"].astype(str) + "_" + cohort["hadm_id"].astype(str)
+        
+        mapping_df = None
+        if os.path.exists(args.mapping_path):
+            logger.info(f"Aligning to {args.mapping_path}...")
+            mapping_df = pd.read_csv(args.mapping_path)
+            mapping_df['hadm_id'] = mapping_df['node_name'].apply(lambda x: int(x.split('_')[1]))
+            target_ids = mapping_df['hadm_id'].values
+        else:
+            logger.warning("Mapping not found. Aligning to cohort file directly.")
+            target_ids = cohort['hadm_id'].values
+
+        X_counts = grp.reindex(target_ids).fillna(0).values
+        logger.info(f"Feature Matrix Shape: {X_counts.shape}")
+        
+        # 3. TF-IDF
+        logger.info("Applying TF-IDF...")
+        tfidf = TfidfTransformer()
+        X_tfidf = tfidf.fit_transform(X_counts)
 
     # 4. KNN Graph Construction
     logger.info(f"Building KNN Graph (k={args.k})...")
+    # Convert sparse to dense if needed for NearestNeighbors (it handles sparse, but let's be safe if using embeddings)
+    if not isinstance(X_tfidf, np.ndarray):
+        # Sparse matrix from TfidfTransformer
+        pass # NearestNeighbors handles sparse
+    
     knn = NearestNeighbors(n_neighbors=args.k, metric='cosine', n_jobs=8)
     knn.fit(X_tfidf)
     distances, indices = knn.kneighbors(X_tfidf)
@@ -104,8 +138,11 @@ def main(args):
     edge_index = torch.tensor([source_nodes, target_nodes], dtype=torch.long)
     edge_attr = torch.tensor(edge_weights, dtype=torch.float)
 
-    # Use TF-IDF as node features for now; keep dense for compatibility with PyG
-    node_features = torch.tensor(X_tfidf.toarray(), dtype=torch.float)
+    # Use features as node features
+    if isinstance(X_tfidf, np.ndarray):
+         node_features = torch.tensor(X_tfidf, dtype=torch.float)
+    else:
+         node_features = torch.tensor(X_tfidf.toarray(), dtype=torch.float)
 
     data = Data(edge_index=edge_index, edge_attr=edge_attr, x=node_features, num_nodes=X_tfidf.shape[0])
 
@@ -119,8 +156,10 @@ def main(args):
     if mapping_df is not None:
         node_names = mapping_df["node_name"].tolist()
     else:
+        # Fallback if mapping_df wasn't created (should be covered by else block logic but just in case)
         subj_map = cohort.set_index("hadm_id")["subject_id"].to_dict()
         node_names = [f"{subj_map.get(h, 'unknown')}_{int(h)}" for h in target_ids]
+    
     mapping_out = os.path.join(args.save_dir, "graph_node_map.csv")
     map_df = pd.DataFrame({
         "node_idx": np.arange(len(target_ids)),
@@ -137,6 +176,7 @@ if __name__ == "__main__":
     parser.add_argument("--mapping_path", type=str, required=True)
     parser.add_argument("--save_dir", type=str, default="data/interim/ehr_long_los/graph")
     parser.add_argument("--k", type=int, default=15, help="Number of neighbors")
+    parser.add_argument("--use_embeddings", type=str, default=None, help="Path to embeddings .npz to use for graph construction")
     
     args = parser.parse_args()
     main(args)
