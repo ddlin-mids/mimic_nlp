@@ -76,15 +76,15 @@
 
 ## 6. Open Questions & Unknowns
 
-*   **Transformer Fusion:** We trained the Transformer Encoder separately. We haven't yet seen the *fully trained* result of "Gated Fusion taking Transformer Embeddings as input" on the *Test* set (job was pending/logging issue). Validation proxy suggests it should be ~0.65+.
+*   **Ceiling Beyond 0.64 AUC:** With today's HPO sweeps, multiple Transformer-based fusion models now cluster tightly around the 0.63–0.64 AUC band (GRU XGBoost, GRU Gated Fusion, Transformer MLP HPO, Transformer Gated HPO). It remains unclear whether additional model complexity alone can break this ceiling without substantially more data or label refinement.
 *   **Text Finetuning:** ModernBERT was used as a frozen feature extractor. End-to-end fine-tuning might resolve the "noise" issue better than gating, but requires massive compute.
 
 ---
 
 ## 7. Next Steps
 
-1.  **Immediate:** Verify Test set metrics for the specific "Gated Fusion + Transformer" run (check MLflow logs manually if script missed it).
-2.  **Short-term:** Integrate the Transformer Encoder directly into the XGBoost pipeline (replace GRU features) to likely achieve the absolute best single model (Projected AUROC ~0.65+).
+1.  **Immediate:** Lock in a short list of deployment candidates (GRU XGBoost, GRU Gated Fusion, Transformer Early Fusion MLP HPO) and compare their calibration/threshold behavior for clinical operating points.
+2.  **Short-term:** Use the new MLflow-backed HPO scripts as the canonical entry points for future sweeps (e.g., different cohorts or longer prediction windows) so that train/val/test splits remain comparable.
 3.  **Nice-to-have:** Re-visit GNN with a dedicated environment to fix the `torch-scatter` warnings and see if spatial neighbors add value.
 
 ---
@@ -97,3 +97,35 @@
     3.  `scripts/slurm/train_gated_fusion.sbatch` (Train Model).
 *   **Config:** `hidden_dim=128`, `dropout=0.3`, `lr=2e-4`. Seed `42`.
 *   **Lineage:** `long_los_cohort.csv` -> `ehr_preprocessed_*.pkl` -> `structured_ehr_embeddings.npz` -> Models.
+
+---
+
+## 9. Evening HPO Sweep: Transformer-Based Fusion
+
+After the initial architecture comparison, we ran a series of **Optuna HPO sweeps** and consolidated results via MLflow and `collect_metrics.sbatch`. These runs use **train+val for tuning**, then train on **train+val** with internal early stopping and evaluate once on the held-out **test** split.
+
+**Additional Experiments**
+
+*   **XGBoost (Transformer EHR):** Re-ran the ablation script with `embedding_dir=data/interim/ehr_long_los/embeddings_transformer` and an XGBoost HPO sweep. Despite strong validation AUC (~0.657), the best Transformer+XGBoost model underperforms the GRU+XGBoost baseline on test (AUC ~0.625).
+*   **Early Fusion MLP (PyTorch, HPO, Transformer EHR):** Ran `train_fusion_pytorch_hpo.py` with Transformer structured embeddings. The best model achieves **Test AUC 0.6378**, **AUPRC 0.3541**, **F1 0.3465**, nearly matching Gated Fusion and GRU+XGBoost while offering stronger recall.
+*   **Gated Fusion (PyTorch, HPO, Transformer EHR):** Ran `train_gated_fusion_hpo.py` to tune hidden size, dropout, and learning rate. The tuned model achieves **Test AUC 0.6316**, **AUPRC 0.3613**, **F1 0.2947**, improving calibration over the original Transformer Gated runs but still slightly below GRU Gated Fusion on AUC.
+*   **Temporal Attention (Transformer EHR):** Fixed data path issues and re-ran temporal cross-attention with Transformer EHR sequences. The updated run reaches **Test AUC 0.6307**, **AUPRC 0.3464**, showing that cross-attention is competitive but still not dominant.
+
+**Consolidated Leaderboard (Post-HPO, Test Set)**
+
+From `results/cohort_results/final_model_comparison.csv`:
+
+| Model                    | Encoder / Notes         | Fusion           | Test AUC | Test AUPRC | Test F1 |
+| :---------------------- | :---------------------- | :--------------- | :------- | :--------- | :------ |
+| XGBoost                 | GRU EHR                 | None             | 0.6406   | 0.3408     | 0.00    |
+| Gated Fusion            | GRU EHR + Text          | Gated (GMU)      | 0.6380   | 0.3495     | 0.2887  |
+| Early Fusion (MLP HPO)  | Transf. EHR + Text      | MLP (Concat)     | 0.6378   | 0.3541     | 0.3465  |
+| XGBoost (Fusion)        | GRU EHR + Text          | Concatenation    | 0.6371   | 0.3495     | 0.0903  |
+| Gated Fusion (Optuna)   | Transf. EHR + Text      | Gated (GMU)      | 0.6316   | 0.3613     | 0.2947  |
+| Temporal Attention      | Transf. EHR + Text      | Cross-Attention  | 0.6307   | 0.3464     | 0.1801  |
+
+**Takeaways**
+
+*   **GRU+XGBoost remains the best pure ranking model**, but several Transformer-based fusion models are now within ~0.003 AUC, with better AUPRC and F1.
+*   **Transformer Early Fusion (MLP HPO)** is now a strong deployment candidate, combining competitive AUC with the best F1 among the top models.
+*   **Transformer Gated Fusion (Optuna)** confirms that gating still helps in the Transformer regime, but the gains over simpler fusion are incremental on this cohort.

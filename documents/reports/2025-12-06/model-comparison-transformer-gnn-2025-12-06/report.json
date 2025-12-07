@@ -41,7 +41,10 @@
   ],
   "analysis": {
     "top_features": ["Structured Temporal Sequence"],
-    "sanity_checks": ["Fusion Paradox verified (Early Fusion degrades performance)"]
+    "sanity_checks": [
+      "Fusion Paradox verified (Early Fusion degrades performance).",
+      "Post-HPO, multiple Transformer-based fusion models cluster near the GRU+XGBoost baseline, suggesting an AUC ceiling around 0.64 on this cohort."
+    ]
   },
   "artifacts": [
     {"name": "structured_ehr_embeddings.npz", "purpose": "Transformer-encoded patient vectors"},
@@ -49,18 +52,35 @@
     {"name": "embeddings_tsne.png", "purpose": "Visualization of modality separability"}
   ],
   "impact": {
-    "utility": "Validates Transformer > GRU for clinical timelines (+0.007 AUROC).",
-    "robustness": "Gated Fusion robust to text noise.",
-    "decision_readiness": "Models ready for pilot shadow mode.",
+    "utility": "Validates Transformer > GRU for clinical timelines (+0.007 AUROC) and shows that carefully tuned fusion (Gated / MLP HPO) can nearly match a strong XGBoost baseline.",
+    "robustness": "Gated Fusion and HPO-tuned MLP remain robust to text noise and calibration issues.",
+    "decision_readiness": "Shortlist of candidate models (GRU XGBoost, GRU Gated Fusion, Transformer MLP HPO) is ready for pilot shadow mode.",
     "risks": ["Small sample size (15k) limits Deep Learning potential."]
   },
   "deviations": ["Switched from DGL to PyG due to dependency issues.", "Deprioritized GNN due to instability."],
   "open_questions": [
-    {"question": "Does GNN add value over Gated Fusion?", "evidence_needed": "Stable GNN training run."}
+    {"question": "Does GNN add value over Gated Fusion?", "evidence_needed": "Stable GNN training run."},
+    {
+      "question": "Can we break the ~0.64 AUC ceiling without more data?",
+      "evidence_needed": "Experiments on larger or less restricted cohorts, or refined labels, showing consistent gains over current best models."
+    }
   ],
   "next_steps": [
-    {"owner": "Data Eng", "action": "Integrate Transformer embeddings into XGBoost", "success": "AUROC > 0.66"},
-    {"owner": "DS", "action": "Fine-tune ModernBERT end-to-end", "success": "Text-only AUROC > 0.64"}
+    {
+      "owner": "Data Eng",
+      "action": "Formalize MLflow-backed HPO scripts (XGBoost, PyTorch MLP, Gated Fusion) as canonical entry points for future sweeps.",
+      "success": "All new experiments log train/val/test metrics and appear in the consolidated comparison table."
+    },
+    {
+      "owner": "DS",
+      "action": "Compare calibration and threshold behavior for GRU XGBoost vs GRU Gated Fusion vs Transformer MLP HPO.",
+      "success": "Selected deployment candidate with documented operating point (precision/recall trade-off)."
+    },
+    {
+      "owner": "DS",
+      "action": "Fine-tune ModernBERT end-to-end (optional, resource permitting).",
+      "success": "Text-only AUROC > 0.64."
+    }
   ],
   "reproducibility": {
     "entry_points": ["scripts/slurm/train_ehr_transformer.sbatch", "scripts/slurm/train_gated_fusion.sbatch"],
