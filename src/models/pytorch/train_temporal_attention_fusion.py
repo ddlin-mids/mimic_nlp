@@ -97,12 +97,20 @@ class TemporalAttentionFusionModel(nn.Module):
         return logits, attn_weights
 
 class FusionDataLoader:
-    def __init__(self, base_dir="."):
+    def __init__(self, base_dir=".", embedding_dir=None):
         self.base_dir = Path(base_dir)
         self.cohort_path = self.base_dir / "data/interim/readmit_analysis/long_los_cohort.csv"
+
+        # Use custom embedding directory if provided (e.g., for transformer embeddings)
+        if embedding_dir:
+            embeddings_path = Path(embedding_dir)
+        else:
+            # Default to old GRU embeddings location
+            embeddings_path = self.base_dir / "data/interim/ehr_long_los/embeddings"
+
         # Note the _seq file
-        self.structured_seq_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_embeddings_seq.npz"
-        self.structured_mapping_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
+        self.structured_seq_path = embeddings_path / "structured_ehr_embeddings_seq.npz"
+        self.structured_mapping_path = embeddings_path / "structured_ehr_mapping.csv"
         self.discharge_path = self.base_dir / "data/interim/embeddings/notes/discharge_summary.npz"
         self.radiology_path = self.base_dir / "data/interim/embeddings/notes/radiology_report.npz"
 
@@ -241,6 +249,7 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--pca_components", type=int, default=64, help="PCA for text (0=disable)")
+    parser.add_argument("--embedding_dir", type=str, default=None, help="Path to structured embeddings directory (e.g., embeddings_transformer)")
     args = parser.parse_args()
 
     # MLflow Robustness
@@ -251,7 +260,7 @@ def main():
     np.random.seed(args.seed)
     mlflow.set_experiment("mimic_cardiorenal_temporal_attention")
     
-    loader = FusionDataLoader()
+    loader = FusionDataLoader(embedding_dir=args.embedding_dir)
     ehr_seq, txt_data, y, splits, pca_explained = loader.load_data(pca_components=args.pca_components)
     
     train_idx = splits == 'train'

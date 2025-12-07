@@ -13,6 +13,42 @@ from tqdm import tqdm
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
+def _symmetrize_edges(source_nodes, target_nodes, edge_weights):
+    """
+    Make edges undirected by taking the max weight for each unordered pair and dropping self-loops.
+    """
+    src = source_nodes.astype(int)
+    tgt = target_nodes.astype(int)
+    wts = edge_weights.astype(float)
+
+    mask = src != tgt
+    src = src[mask]
+    tgt = tgt[mask]
+    wts = wts[mask]
+
+    edge_dict = {}
+    for s, t, w in zip(src, tgt, wts):
+        a, b = (s, t) if s < t else (t, s)
+        key = (a, b)
+        if key not in edge_dict or w > edge_dict[key]:
+            edge_dict[key] = w
+
+    undirected_src = []
+    undirected_tgt = []
+    undirected_w = []
+    for (a, b), w in edge_dict.items():
+        undirected_src.extend([a, b])
+        undirected_tgt.extend([b, a])
+        undirected_w.extend([w, w])
+
+    return (
+        np.array(undirected_src, dtype=np.int64),
+        np.array(undirected_tgt, dtype=np.int64),
+        np.array(undirected_w, dtype=np.float32),
+    )
+
+
 def main(args):
     # 1. Load Data
     logger.info(f"Loading features from {args.input_path}...")
@@ -33,11 +69,12 @@ def main(args):
     cohort = pd.read_csv(args.cohort_path)
     cohort["node_name"] = cohort["subject_id"].astype(str) + "_" + cohort["hadm_id"].astype(str)
     
+    mapping_df = None
     if os.path.exists(args.mapping_path):
         logger.info(f"Aligning to {args.mapping_path}...")
-        mapping = pd.read_csv(args.mapping_path)
-        mapping['hadm_id'] = mapping['node_name'].apply(lambda x: int(x.split('_')[1]))
-        target_ids = mapping['hadm_id'].values
+        mapping_df = pd.read_csv(args.mapping_path)
+        mapping_df['hadm_id'] = mapping_df['node_name'].apply(lambda x: int(x.split('_')[1]))
+        target_ids = mapping_df['hadm_id'].values
     else:
         logger.warning("Mapping not found. Aligning to cohort file directly.")
         target_ids = cohort['hadm_id'].values
@@ -49,28 +86,49 @@ def main(args):
     logger.info("Applying TF-IDF...")
     tfidf = TfidfTransformer()
     X_tfidf = tfidf.fit_transform(X_counts)
-    
+
     # 4. KNN Graph Construction
     logger.info(f"Building KNN Graph (k={args.k})...")
     knn = NearestNeighbors(n_neighbors=args.k, metric='cosine', n_jobs=8)
     knn.fit(X_tfidf)
     distances, indices = knn.kneighbors(X_tfidf)
-    
+
     # Convert to PyG Graph
     source_nodes = np.repeat(np.arange(X_tfidf.shape[0]), args.k)
     target_nodes = indices.flatten()
     edge_weights = 1 - distances.flatten()
-    
+
+    # Symmetrize and drop self-loops
+    source_nodes, target_nodes, edge_weights = _symmetrize_edges(source_nodes, target_nodes, edge_weights)
+
     edge_index = torch.tensor([source_nodes, target_nodes], dtype=torch.long)
     edge_attr = torch.tensor(edge_weights, dtype=torch.float)
-    
-    data = Data(edge_index=edge_index, edge_attr=edge_attr, num_nodes=X_tfidf.shape[0])
-    
+
+    # Use TF-IDF as node features for now; keep dense for compatibility with PyG
+    node_features = torch.tensor(X_tfidf.toarray(), dtype=torch.float)
+
+    data = Data(edge_index=edge_index, edge_attr=edge_attr, x=node_features, num_nodes=X_tfidf.shape[0])
+
     # 5. Save
     os.makedirs(args.save_dir, exist_ok=True)
     out_path = os.path.join(args.save_dir, "graph_pyg.pt")
     torch.save(data, out_path)
     logger.info(f"Saved PyG graph to {out_path}")
+
+    # Save node ordering for downstream label alignment
+    if mapping_df is not None:
+        node_names = mapping_df["node_name"].tolist()
+    else:
+        subj_map = cohort.set_index("hadm_id")["subject_id"].to_dict()
+        node_names = [f"{subj_map.get(h, 'unknown')}_{int(h)}" for h in target_ids]
+    mapping_out = os.path.join(args.save_dir, "graph_node_map.csv")
+    map_df = pd.DataFrame({
+        "node_idx": np.arange(len(target_ids)),
+        "hadm_id": target_ids,
+        "node_name": node_names
+    })
+    map_df.to_csv(mapping_out, index=False)
+    logger.info(f"Saved node mapping to {mapping_out}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -1,0 +1,2 @@
+Experiment ID,Data Slice,Model,Key Change,Metric 1,Metric 2,Notes
+graph-build-gnn,all,graph prep (PyG),TF-IDF node features + sym KNN k=15,nodes=15659,feats=6260,Self-loops removed; mapping saved

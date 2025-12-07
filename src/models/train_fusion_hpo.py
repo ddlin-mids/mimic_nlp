@@ -7,26 +7,29 @@ import pandas as pd
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
-from sklearn.neural_network import MLPClassifier
-from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, f1_score, confusion_matrix
+from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, f1_score
 import xgboost as xgb
 import mlflow
 import mlflow.sklearn
 import mlflow.xgboost
 import optuna
-from optuna.integration.mlflow import MLflowCallback
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class FusionDataLoader:
-    def __init__(self, base_dir="."):
+    def __init__(self, base_dir=".", embedding_dir=None):
         self.base_dir = Path(base_dir)
         self.cohort_path = self.base_dir / "data/interim/readmit_analysis/long_los_cohort.csv"
         self.static_ehr_path = self.base_dir / "data/interim/ehr_long_los/embeddings/static_ehr_embeddings.npz"
-        self.structured_ehr_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_embeddings.npz"
-        self.structured_mapping_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
+        if embedding_dir:
+            embed_base = Path(embedding_dir)
+            self.structured_ehr_path = embed_base / "structured_ehr_embeddings.npz"
+            self.structured_mapping_path = embed_base / "structured_ehr_mapping.csv"
+        else:
+            self.structured_ehr_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_embeddings.npz"
+            self.structured_mapping_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
         self.discharge_path = self.base_dir / "data/interim/embeddings/notes/discharge_summary.npz"
         self.radiology_path = self.base_dir / "data/interim/embeddings/notes/radiology_report.npz"
 
@@ -174,68 +177,12 @@ def objective_xgboost(trial, data_dict):
         mlflow.log_metric("val_auc", auc)
         return auc
 
-def objective_mlp(trial, data_dict):
-    splits = data_dict['splits']
-    train_idx = splits == 'train'
-    val_idx = splits == 'val'
-    
-    # PCA
-    pca_n = trial.suggest_categorical('pca_components', [0, 64, 128])
-    text_data = data_dict['text']
-    
-    if pca_n > 0:
-        pca = PCA(n_components=pca_n)
-        pca.fit(text_data[train_idx])
-        text_feat = pca.transform(text_data)
-    else:
-        text_feat = text_data
-        
-    X = np.hstack([data_dict['demo'], data_dict['static'], data_dict['struct'], text_feat])
-    y = data_dict['y']
-    
-    X_train = X[train_idx]
-    y_train = y[train_idx]
-    X_val = X[val_idx]
-    y_val = y[val_idx]
-    
-    # Layer configs
-    n_layers = trial.suggest_int('n_layers', 1, 3)
-    layers = []
-    for i in range(n_layers):
-        units = trial.suggest_int(f'n_units_l{i}', 32, 512, log=True)
-        layers.append(units)
-    
-    params = {
-        'hidden_layer_sizes': tuple(layers),
-        'activation': trial.suggest_categorical('activation', ['relu', 'tanh']),
-        'solver': 'adam',
-        'alpha': trial.suggest_float('alpha', 1e-5, 1e-2, log=True),
-        'learning_rate_init': trial.suggest_float('learning_rate_init', 1e-4, 1e-2, log=True),
-        'batch_size': 128,
-        'max_iter': 200,
-        'early_stopping': True,
-        'validation_fraction': 0.1,
-        'random_state': 42
-    }
-    
-    with mlflow.start_run(nested=True):
-        mlflow.log_params(params)
-        mlflow.log_param("pca_components", pca_n)
-        
-        model = MLPClassifier(**params)
-        model.fit(X_train, y_train)
-        
-        preds = model.predict_proba(X_val)[:, 1]
-        auc = roc_auc_score(y_val, preds)
-        
-        mlflow.log_metric("val_auc", auc)
-        return auc
-
 def train_best_model(model_type, best_params, data_dict):
     logger.info(f"Training best {model_type} model...")
     
     splits = data_dict['splits']
     train_idx = splits == 'train'
+    val_idx = splits == 'val'
     test_idx = splits == 'test'
     
     # Apply PCA if in params
@@ -244,7 +191,8 @@ def train_best_model(model_type, best_params, data_dict):
     
     if pca_n > 0:
         pca = PCA(n_components=pca_n)
-        pca.fit(text_data[train_idx])
+        # Fit PCA on train+val (full training data)
+        pca.fit(text_data[train_idx | val_idx])
         text_feat = pca.transform(text_data)
     else:
         text_feat = text_data
@@ -252,57 +200,42 @@ def train_best_model(model_type, best_params, data_dict):
     X = np.hstack([data_dict['demo'], data_dict['static'], data_dict['struct'], text_feat])
     y = data_dict['y']
     
-    X_train = X[train_idx]
-    y_train = y[train_idx]
+    # Combine train and val for final training
+    trainval_idx = train_idx | val_idx
+    X_train = X[trainval_idx]
+    y_train = y[trainval_idx]
     X_test = X[test_idx]
     y_test = y[test_idx]
     
-    if model_type == "xgboost":
-        # Re-add fixed params not optimized
-        final_params = best_params.copy()
-        # Remove non-XGB params
-        final_params.pop('pca_components', None)
-        
-        final_params.update({
-            'n_estimators': 1000, 
-            'eval_metric': 'auc', 
-            'n_jobs': -1,
-            'random_state': 42,
-            'tree_method': 'hist',
-            'early_stopping_rounds': 50
-        })
-        
-        # Internal split for early stopping
-        from sklearn.model_selection import train_test_split
-        X_tr_final, X_val_final, y_tr_final, y_val_final = train_test_split(
-            X_train, y_train, test_size=0.1, random_state=42
-        )
-        
-        model = xgb.XGBClassifier(**final_params)
-        model.fit(
-            X_tr_final, y_tr_final,
-            eval_set=[(X_val_final, y_val_final)],
-            verbose=False
-        )
-        
-    elif model_type == "mlp":
-        # Construct layers tuple from numbered params
-        layers = []
-        i = 0
-        while f'n_units_l{i}' in best_params:
-            layers.append(best_params[f'n_units_l{i}'])
-            i += 1
-        
-        # Filter out helper keys
-        final_params = {
-            k: v for k, v in best_params.items() 
-            if not k.startswith('n_units_l') and k != 'n_layers' and k != 'pca_components'
-        }
-        final_params['hidden_layer_sizes'] = tuple(layers)
-        final_params.update({'max_iter': 500, 'random_state': 42, 'solver': 'adam', 'batch_size': 128})
-        
-        model = MLPClassifier(**final_params)
-        model.fit(X_train, y_train)
+    if model_type != "xgboost":
+        raise ValueError(f"Unsupported model_type '{model_type}'. Only 'xgboost' is supported.")
+
+    # Re-add fixed params not optimized
+    final_params = best_params.copy()
+    # Remove non-XGB params
+    final_params.pop('pca_components', None)
+
+    final_params.update({
+        'n_estimators': 1000,
+        'eval_metric': 'auc',
+        'n_jobs': -1,
+        'random_state': 42,
+        'tree_method': 'hist',
+        'early_stopping_rounds': 50
+    })
+
+    # Internal split for early stopping
+    from sklearn.model_selection import train_test_split
+    X_tr_final, X_val_final, y_tr_final, y_val_final = train_test_split(
+        X_train, y_train, test_size=0.1, random_state=42
+    )
+
+    model = xgb.XGBClassifier(**final_params)
+    model.fit(
+        X_tr_final, y_tr_final,
+        eval_set=[(X_val_final, y_val_final)],
+        verbose=False
+    )
 
     # Evaluation
     preds_prob = model.predict_proba(X_test)[:, 1]
@@ -317,15 +250,12 @@ def train_best_model(model_type, best_params, data_dict):
     
     # Artifacts
     try:
-        if model_type == "xgboost":
-            import matplotlib.pyplot as plt
-            xgb.plot_importance(model, max_num_features=20)
-            plt.title(f"XGBoost Feature Importance")
-            plt.savefig("feature_importance.png")
-            mlflow.log_artifact("feature_importance.png")
-            mlflow.xgboost.log_model(model, "model")
-        else:
-            mlflow.sklearn.log_model(model, "model")
+        import matplotlib.pyplot as plt
+        xgb.plot_importance(model, max_num_features=20)
+        plt.title("XGBoost Feature Importance")
+        plt.savefig("feature_importance.png")
+        mlflow.log_artifact("feature_importance.png")
+        mlflow.xgboost.log_model(model, "model")
     except OSError as e:
         logger.warning(f"Failed to log artifacts due to filesystem error: {e}")
     except Exception as e:
@@ -336,26 +266,35 @@ def train_best_model(model_type, best_params, data_dict):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--trials", type=int, default=20, help="Number of Optuna trials")
-    parser.add_argument("--model", type=str, required=True, choices=["xgboost", "mlp"])
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="xgboost",
+        choices=["xgboost"],
+        help="Model type to tune (only 'xgboost' is supported; PyTorch MLP HPO lives in src/models/pytorch/train_fusion_pytorch_hpo.py).",
+    )
+    parser.add_argument(
+        "--embedding_dir",
+        type=str,
+        default=None,
+        help="Optional directory containing structured_ehr_embeddings.npz and structured_ehr_mapping.csv. "
+        "If not set, defaults to GRU-based embeddings under data/interim/ehr_long_los/embeddings/.",
+    )
     args = parser.parse_args()
 
     mlflow.set_experiment("mimic_cardiorenal_readmission")
     
-    loader = FusionDataLoader()
+    loader = FusionDataLoader(embedding_dir=args.embedding_dir)
     data_dict = loader.load_data_dict()
     
     logger.info(f"Loaded data. Splits: {pd.Series(data_dict['splits']).value_counts().to_dict()}")
     
-    with mlflow.start_run(run_name=f"HPO_{args.model.upper()}"):
-        mlflow.log_param("model_type", args.model)
+    with mlflow.start_run(run_name="HPO_XGBOOST"):
+        mlflow.log_param("model_type", "xgboost")
         mlflow.log_param("n_trials", args.trials)
         
         study = optuna.create_study(direction="maximize")
-        
-        if args.model == "xgboost":
-            objective = lambda trial: objective_xgboost(trial, data_dict)
-        else:
-            objective = lambda trial: objective_mlp(trial, data_dict)
+        objective = lambda trial: objective_xgboost(trial, data_dict)
             
         study.optimize(objective, n_trials=args.trials)
         

@@ -14,7 +14,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=32G
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/slurm/temp_attn_%j.log
 
@@ -31,14 +31,17 @@ echo "===================================================================="
 
 cd "$SLURM_SUBMIT_DIR"
 
-echo ">>> Starting Training..."
+EMBEDDING_DIR="${SLURM_SUBMIT_DIR}/data/interim/ehr_long_los/embeddings_transformer"
+
+echo ">>> Starting Training with Transformer Embeddings..."
 uv run python src/models/pytorch/train_temporal_attention_fusion.py \
     --lr 2e-4 \
     --dropout 0.3 \
     --embed_dim 64 \
     --num_heads 4 \
     --epochs 30 \
-    --pca_components 64
+    --pca_components 64 \
+    --embedding_dir "${EMBEDDING_DIR}"
 
 echo "===================================================================="
 echo "Job Completed: $(date)"

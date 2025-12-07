@@ -84,11 +84,16 @@ class GatedFusionModel(nn.Module):
 # DataLoader
 # -----------------------------------------------------------------------------
 class FusionDataLoader:
-    def __init__(self, base_dir="."):
+    def __init__(self, base_dir=".", embedding_dir=None):
         self.base_dir = Path(base_dir)
         self.cohort_path = self.base_dir / "data/interim/readmit_analysis/long_los_cohort.csv"
-        self.structured_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_embeddings.npz"
-        self.structured_mapping_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
+        if embedding_dir:
+            embed_base = Path(embedding_dir)
+            self.structured_path = embed_base / "structured_ehr_embeddings.npz"
+            self.structured_mapping_path = embed_base / "structured_ehr_mapping.csv"
+        else:
+            self.structured_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_embeddings.npz"
+            self.structured_mapping_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
         self.discharge_path = self.base_dir / "data/interim/embeddings/notes/discharge_summary.npz"
         self.radiology_path = self.base_dir / "data/interim/embeddings/notes/radiology_report.npz"
 
@@ -204,9 +209,7 @@ def objective(trial, ehr_data, txt_data, y, splits, pca_components=64, device="c
     from sklearn.decomposition import PCA
     train_mask = splits == 'train'
     pca = PCA(n_components=pca_components)
-    txt_reduced = pca.fit_transform(txt_data) # Fit on all is data leakage! 
-    # Correct: Fit on train, transform all
-    pca = PCA(n_components=pca_components)
+    # Fit PCA on train only to avoid leakage, then transform all
     pca.fit(txt_data[train_mask])
     txt_reduced = pca.transform(txt_data)
     
@@ -246,13 +249,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--trials", type=int, default=30)
     parser.add_argument("--pca", type=int, default=64)
+    parser.add_argument(
+        "--embedding_dir",
+        type=str,
+        default=None,
+        help="Optional directory containing structured_ehr_embeddings.npz and structured_ehr_mapping.csv. "
+        "If not set, defaults to GRU-based embeddings under data/interim/ehr_long_los/embeddings/.",
+    )
     args = parser.parse_args()
     
     mlflow.set_experiment("mimic_cardiorenal_gated_hpo")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    loader = FusionDataLoader()
+    loader = FusionDataLoader(embedding_dir=args.embedding_dir)
     ehr_data, txt_data, y, splits = loader.load_data(pca_components=0) # Load raw, PCA inside
     
     study = optuna.create_study(direction="maximize")
@@ -265,10 +275,92 @@ def main():
     logger.info(f"Best params: {study.best_params}")
     logger.info(f"Best AUC: {study.best_value}")
     
-    # Log best to MLflow
+    # Train best model on train+val, evaluate on test
+    best_params = study.best_params
+    from sklearn.decomposition import PCA
+    from sklearn.model_selection import train_test_split
+
+    train_mask = splits == 'train'
+    val_mask = splits == 'val'
+    test_mask = splits == 'test'
+
+    # Fit PCA on train+val, then transform all
+    pca = PCA(n_components=args.pca)
+    pca.fit(txt_data[train_mask | val_mask])
+    txt_reduced = pca.transform(txt_data)
+
+    # Build train/val_internal/test splits for final training
+    ehr_train_full = ehr_data[train_mask | val_mask]
+    txt_train_full = txt_reduced[train_mask | val_mask]
+    y_train_full = y[train_mask | val_mask]
+
+    ehr_test = ehr_data[test_mask]
+    txt_test = txt_reduced[test_mask]
+    y_test = y[test_mask]
+
+    ehr_tr, ehr_val_int, txt_tr, txt_val_int, y_tr, y_val_int = train_test_split(
+        ehr_train_full,
+        txt_train_full,
+        y_train_full,
+        test_size=0.1,
+        random_state=42,
+    )
+
+    train_ds = GatedFusionDataset(ehr_tr, txt_tr, y_tr)
+    val_ds = GatedFusionDataset(ehr_val_int, txt_val_int, y_val_int)
+    test_ds = GatedFusionDataset(ehr_test, txt_test, y_test)
+
+    train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=64)
+    test_loader = DataLoader(test_ds, batch_size=64)
+
+    model = GatedFusionModel(
+        ehr_dim=ehr_train_full.shape[1],
+        txt_dim=txt_train_full.shape[1],
+        hidden_dim=best_params["hidden_dim"],
+        dropout=best_params["dropout"],
+    ).to(device)
+
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=best_params["lr"],
+        weight_decay=best_params["weight_decay"],
+    )
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, 0, len(train_loader) * 30
+    )
+
+    best_state = None
+    best_val_auc = 0.0
+
+    # Log best to MLflow, including final test metrics
     with mlflow.start_run(run_name="Best_HPO_Gated"):
-        mlflow.log_params(study.best_params)
+        mlflow.log_params(best_params)
         mlflow.log_metric("best_val_auc", study.best_value)
+
+        for epoch in range(30):
+            train_epoch(model, train_loader, criterion, optimizer, scheduler, device)
+            val_auc, _, _ = evaluate(model, val_loader, criterion, device)
+            mlflow.log_metric("val_auc", val_auc, step=epoch)
+
+            if val_auc > best_val_auc:
+                best_val_auc = val_auc
+                best_state = model.state_dict()
+
+        if best_state is not None:
+            model.load_state_dict(best_state)
+
+        test_auc, test_auprc, test_f1 = evaluate(model, test_loader, criterion, device)
+        mlflow.log_metrics(
+            {
+                "test_auc": test_auc,
+                "test_auprc": test_auprc,
+                "test_f1": test_f1,
+            }
+        )
+
+        mlflow.pytorch.log_model(model, "model")
 
 if __name__ == "__main__":
     main()

@@ -5,7 +5,7 @@
 # Resources: 16 CPUs, 64GB Memory.
 #
 # Usage:
-#   sbatch scripts/slurm/train_fusion_hpo.sbatch <xgboost|mlp>
+#   sbatch scripts/slurm/train_fusion_hpo.sbatch
 #
 
 #SBATCH --job-name=hpo-fusion
@@ -18,22 +18,20 @@
 
 set -euo pipefail
 
-MODEL_TYPE=${1:-xgboost} # Default to xgboost if not provided
-
 export PYTHONUNBUFFERED=1
 export MLFLOW_TRACKING_URI="file://${SLURM_SUBMIT_DIR}/mlruns"
 
 echo "===================================================================="
 echo "Job Started: $(date)"
 echo "Node: $(hostname)"
-echo "Model: $MODEL_TYPE"
+echo "Model: xgboost"
 echo "MLflow URI: $MLFLOW_TRACKING_URI"
 echo "===================================================================="
 
 cd "$SLURM_SUBMIT_DIR"
 
-echo ">>> Starting HPO for $MODEL_TYPE..."
-uv run python src/models/train_fusion_hpo.py --model "$MODEL_TYPE" --trials 20
+echo ">>> Starting HPO for xgboost..."
+uv run python src/models/train_fusion_hpo.py --trials 20
 
 echo "===================================================================="
 echo "Job Completed: $(date)"

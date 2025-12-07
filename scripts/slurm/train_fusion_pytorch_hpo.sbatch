@@ -31,8 +31,10 @@ echo "===================================================================="
 
 cd "$SLURM_SUBMIT_DIR"
 
-echo ">>> Starting HPO..."
-uv run python src/models/pytorch/train_fusion_pytorch_hpo.py --trials 30
+echo ">>> Starting HPO with Transformer embeddings..."
+uv run python src/models/pytorch/train_fusion_pytorch_hpo.py \
+    --trials 30 \
+    --embedding_dir "data/interim/ehr_long_los/embeddings_transformer"
 
 echo "===================================================================="
 echo "Job Completed: $(date)"

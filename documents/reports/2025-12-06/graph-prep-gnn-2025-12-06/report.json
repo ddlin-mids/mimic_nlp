@@ -1,0 +1,115 @@
+{
+  "date": "2025-12-06",
+  "agents": ["Codex Agent"],
+  "project": "Cardiorenal Readmission Prediction (MIMIC-IV)",
+  "starting_plan": [
+    "Align graph preprocessing with PyG/STGNN expectations",
+    "Produce feature-complete patient graph (x, edge_index, edge_attr, mapping)",
+    "Ready GPU GraphSAGE training job"
+  ],
+  "data": {
+    "sources": [
+      "data/interim/ehr_long_los/ehr_preprocessed_all_one_hot.pkl",
+      "data/interim/readmit_analysis/long_los_cohort.csv",
+      "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
+    ],
+    "rows_after_filters": 15659,
+    "transforms": [
+      "TF-IDF (6260 dims)",
+      "KNN k=15 cosine",
+      "Symmetrize edges and drop self-loops"
+    ],
+    "quality": {
+      "missing_pct": null,
+      "label_balance": {
+        "pos": null,
+        "neg": null
+      }
+    }
+  },
+  "experiments": [
+    {
+      "id": "graph-build-gnn",
+      "slice": "all",
+      "model": "graph prep (PyG)",
+      "key_change": "TF-IDF node features + sym KNN k=15",
+      "metrics": {
+        "nodes": 15659,
+        "features": 6260
+      },
+      "notes": "Self-loops removed; mapping saved"
+    }
+  ],
+  "analysis": {
+    "top_features": [],
+    "sanity_checks": [
+      "Aligned node order to structured_ehr_mapping.csv",
+      "Self-loops removed via symmetrization"
+    ]
+  },
+  "artifacts": [
+    {
+      "name": "data/interim/ehr_long_los/graph/graph_pyg.pt",
+      "purpose": "PyG graph with TF-IDF node features"
+    },
+    {
+      "name": "data/interim/ehr_long_los/graph/graph_node_map.csv",
+      "purpose": "node_idx to hadm_id/node_name mapping"
+    },
+    {
+      "name": "logs/slurm/prep_graph_46985966.log",
+      "purpose": "run log"
+    }
+  ],
+  "impact": {
+    "utility": "Graph is feature-complete for GNN training",
+    "robustness": "Symmetrized edges and removed self-loops to reduce noise",
+    "decision_readiness": "Ready to launch GraphSAGE once environment check passes",
+    "risks": [
+      "uv run/pyenv shim blocking torch inspection of graph_pyg.pt"
+    ]
+  },
+  "deviations": [
+    "Could not load graph via uv run because of pyenv shim/cache permissions"
+  ],
+  "open_questions": [
+    {
+      "question": "Can uv run be unblocked to inspect graph tensors?",
+      "evidence_needed": "Successful torch load of graph_pyg.pt via uv run"
+    },
+    {
+      "question": "Should Transformer embeddings replace TF-IDF for initial GraphSAGE run?",
+      "evidence_needed": "Ablation comparing TF-IDF vs Transformer node features"
+    }
+  ],
+  "next_steps": [
+    {
+      "owner": "Codex",
+      "action": "Fix uv run/pyenv shim and log graph tensor shapes",
+      "success": "torch load of graph_pyg.pt succeeds and edge count recorded"
+    },
+    {
+      "owner": "Codex",
+      "action": "Submit train_gnn.sbatch on free-gpu with new graph",
+      "success": "Run completes with test AUROC/AUPRC logged"
+    },
+    {
+      "owner": "Codex",
+      "action": "Regenerate graph with Transformer node features (ablation)",
+      "success": "Graph artifacts saved with mapping and documented"
+    }
+  ],
+  "reproducibility": {
+    "entry_points": [
+      "scripts/slurm/preprocess_graph.sbatch",
+      "ehr/preprocess_graph.py"
+    ],
+    "config": {
+      "k": 15,
+      "distance": "cosine",
+      "features": "TF-IDF 6260 dims",
+      "edge_symmetry": "undirected, self-loops removed"
+    },
+    "lineage": "long_los cohort -> daily EHR one-hot -> TF-IDF -> KNN graph -> PyG graph + mapping"
+  }
+}

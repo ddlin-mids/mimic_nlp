@@ -45,12 +45,17 @@ class MLP(nn.Module):
     def forward(self, x): return self.model(x)
 
 class FusionDataLoader:
-    def __init__(self, base_dir="."):
+    def __init__(self, base_dir=".", embedding_dir=None):
         self.base_dir = Path(base_dir)
         self.cohort_path = self.base_dir / "data/interim/readmit_analysis/long_los_cohort.csv"
         self.static_ehr_path = self.base_dir / "data/interim/ehr_long_los/embeddings/static_ehr_embeddings.npz"
-        self.structured_ehr_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_embeddings.npz"
-        self.structured_mapping_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
+        if embedding_dir:
+            embed_base = Path(embedding_dir)
+            self.structured_ehr_path = embed_base / "structured_ehr_embeddings.npz"
+            self.structured_mapping_path = embed_base / "structured_ehr_mapping.csv"
+        else:
+            self.structured_ehr_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_embeddings.npz"
+            self.structured_mapping_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
         self.discharge_path = self.base_dir / "data/interim/embeddings/notes/discharge_summary.npz"
         self.radiology_path = self.base_dir / "data/interim/embeddings/notes/radiology_report.npz"
 
@@ -208,30 +213,49 @@ def objective(trial, X_train, y_train, X_val, y_val, device):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--trials", type=int, default=20)
+    parser.add_argument(
+        "--embedding_dir",
+        type=str,
+        default=None,
+        help="Optional directory containing structured_ehr_embeddings.npz and structured_ehr_mapping.csv. "
+        "If not set, defaults to GRU-based embeddings under data/interim/ehr_long_los/embeddings/.",
+    )
     args = parser.parse_args()
 
     mlflow.set_experiment("mimic_cardiorenal_readmission_pytorch_hpo")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    loader = FusionDataLoader()
+    loader = FusionDataLoader(embedding_dir=args.embedding_dir)
     X, y, splits = loader.load_and_prep_data()
-    X_train, y_train = X[splits=='train'], y[splits=='train']
-    X_val, y_val = X[splits=='val'], y[splits=='val']
-    X_test, y_test = X[splits=='test'], y[splits=='test']
+    train_mask = splits == 'train'
+    val_mask = splits == 'val'
+    test_mask = splits == 'test'
+
+    X_train, y_train = X[train_mask], y[train_mask]
+    X_val, y_val = X[val_mask], y[val_mask]
+    X_test, y_test = X[test_mask], y[test_mask]
 
     study = optuna.create_study(direction="maximize", pruner=optuna.pruners.HyperbandPruner())
     study.optimize(lambda t: objective(t, X_train, y_train, X_val, y_val, device), n_trials=args.trials)
 
     logger.info(f"Best params: {study.best_params}")
     
-    # Train Best Model
+    # Train Best Model on train+val, evaluate on test
     best_params = study.best_params
     hidden_dims = [best_params[f"n_units_l{i}"] for i in range(best_params["n_layers"])]
-    
+
+    # Combine train and val for final training
+    from sklearn.model_selection import train_test_split
+    X_train_full = np.vstack([X_train, X_val])
+    y_train_full = np.concatenate([y_train, y_val])
+    X_tr, X_val_int, y_tr, y_val_int = train_test_split(
+        X_train_full, y_train_full, test_size=0.1, random_state=42
+    )
+
     model = MLP(X_train.shape[1], hidden_dims, best_params["dropout"]).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=best_params["lr"], weight_decay=best_params["weight_decay"])
-    train_loader = DataLoader(ReadmissionDataset(X_train, y_train), batch_size=best_params["batch_size"], shuffle=True)
-    val_loader = DataLoader(ReadmissionDataset(X_val, y_val), batch_size=best_params["batch_size"])
+    train_loader = DataLoader(ReadmissionDataset(X_tr, y_tr), batch_size=best_params["batch_size"], shuffle=True)
+    val_loader = DataLoader(ReadmissionDataset(X_val_int, y_val_int), batch_size=best_params["batch_size"])
     test_loader = DataLoader(ReadmissionDataset(X_test, y_test), batch_size=best_params["batch_size"])
     
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=100, num_training_steps=len(train_loader)*50)

@@ -11,6 +11,7 @@ EXPERIMENTS = [
     "mimic_cardiorenal_ablation",
     "mimic_cardiorenal_readmission",      # HPO XGBoost
     "mimic_cardiorenal_readmission_pytorch", # Early Fusion
+    "mimic_cardiorenal_readmission_pytorch_hpo", # Early Fusion HPO
     "mimic_cardiorenal_late_fusion",       # Late Fusion
     "mimic_cardiorenal_attention_fusion",  # Attention Fusion
     "mimic_cardiorenal_gated_fusion",      # Plan 2: Gated Fusion
@@ -97,6 +98,12 @@ def main():
     if ef_metrics:
         ef_metrics["Model"] = "Early Fusion (MLP)"
         results.append(ef_metrics)
+
+    # 3b. Early Fusion (Neural, HPO)
+    ef_hpo_metrics = get_best_run_metrics("mimic_cardiorenal_readmission_pytorch_hpo")
+    if ef_hpo_metrics:
+        ef_hpo_metrics["Model"] = "Early Fusion (MLP HPO)"
+        results.append(ef_hpo_metrics)
 
     # 4. Late Fusion (Neural)
     lf_metrics = get_best_run_metrics("mimic_cardiorenal_late_fusion")
