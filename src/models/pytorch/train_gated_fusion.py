@@ -109,11 +109,17 @@ class GatedFusionModel(nn.Module):
 # DataLoader
 # -----------------------------------------------------------------------------
 class FusionDataLoader:
-    def __init__(self, base_dir="."):
+    def __init__(self, base_dir=".", embedding_dir=None):
         self.base_dir = Path(base_dir)
         self.cohort_path = self.base_dir / "data/interim/readmit_analysis/long_los_cohort.csv"
-        self.structured_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_embeddings.npz"
-        self.structured_mapping_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
+        
+        if embedding_dir:
+            self.structured_path = Path(embedding_dir) / "structured_ehr_embeddings.npz"
+            self.structured_mapping_path = Path(embedding_dir) / "structured_ehr_mapping.csv"
+        else:
+            self.structured_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_embeddings.npz"
+            self.structured_mapping_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
+            
         self.discharge_path = self.base_dir / "data/interim/embeddings/notes/discharge_summary.npz"
         self.radiology_path = self.base_dir / "data/interim/embeddings/notes/radiology_report.npz"
 
@@ -249,6 +255,7 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--pca_components", type=int, default=64)
+    parser.add_argument("--embedding_dir", type=str, default=None)
     args = parser.parse_args()
 
     if "MLFLOW_RUN_ID" in os.environ: del os.environ["MLFLOW_RUN_ID"]
@@ -258,7 +265,7 @@ def main():
     np.random.seed(args.seed)
     mlflow.set_experiment("mimic_cardiorenal_gated_fusion")
     
-    loader = FusionDataLoader()
+    loader = FusionDataLoader(embedding_dir=args.embedding_dir)
     ehr_data, txt_data, y, splits, pca_explained = loader.load_data(pca_components=args.pca_components)
     
     train_idx = splits == 'train'

@@ -16,12 +16,18 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class FusionDataLoader:
-    def __init__(self, base_dir="."):
+    def __init__(self, base_dir=".", embedding_dir=None):
         self.base_dir = Path(base_dir)
         self.cohort_path = self.base_dir / "data/interim/readmit_analysis/long_los_cohort.csv"
+        
+        if embedding_dir:
+            self.structured_ehr_path = Path(embedding_dir) / "structured_ehr_embeddings.npz"
+            self.structured_mapping_path = Path(embedding_dir) / "structured_ehr_mapping.csv"
+        else:
+            self.structured_ehr_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_embeddings.npz"
+            self.structured_mapping_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
+            
         self.static_ehr_path = self.base_dir / "data/interim/ehr_long_los/embeddings/static_ehr_embeddings.npz"
-        self.structured_ehr_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_embeddings.npz"
-        self.structured_mapping_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
         self.discharge_path = self.base_dir / "data/interim/embeddings/notes/discharge_summary.npz"
         self.radiology_path = self.base_dir / "data/interim/embeddings/notes/radiology_report.npz"
 
@@ -146,9 +152,13 @@ def train_and_evaluate(X_train, y_train, X_test, y_test, params, run_name):
         return metrics
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--embedding_dir", type=str, default=None, help="Path to structured embeddings dir")
+    args = parser.parse_args()
+
     mlflow.set_experiment("mimic_cardiorenal_ablation")
     
-    loader = FusionDataLoader()
+    loader = FusionDataLoader(embedding_dir=args.embedding_dir)
     data_dict = loader.load_data_dict()
     splits = data_dict['splits']
     y = data_dict['y']

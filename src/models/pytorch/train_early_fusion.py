@@ -52,12 +52,18 @@ class MLP(nn.Module):
         return self.model(x)
 
 class FusionDataLoader:
-    def __init__(self, base_dir="."):
+    def __init__(self, base_dir=".", embedding_dir=None):
         self.base_dir = Path(base_dir)
         self.cohort_path = self.base_dir / "data/interim/readmit_analysis/long_los_cohort.csv"
+        
+        if embedding_dir:
+            self.structured_ehr_path = Path(embedding_dir) / "structured_ehr_embeddings.npz"
+            self.structured_mapping_path = Path(embedding_dir) / "structured_ehr_mapping.csv"
+        else:
+            self.structured_ehr_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_embeddings.npz"
+            self.structured_mapping_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
+            
         self.static_ehr_path = self.base_dir / "data/interim/ehr_long_los/embeddings/static_ehr_embeddings.npz"
-        self.structured_ehr_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_embeddings.npz"
-        self.structured_mapping_path = self.base_dir / "data/interim/ehr_long_los/embeddings/structured_ehr_mapping.csv"
         self.discharge_path = self.base_dir / "data/interim/embeddings/notes/discharge_summary.npz"
         self.radiology_path = self.base_dir / "data/interim/embeddings/notes/radiology_report.npz"
 
@@ -205,34 +211,20 @@ def evaluate(model, loader, criterion, device):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--dropout", type=float, default=0.3)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--pca_components", type=int, default=0)
+    parser.add_argument("--embedding_dir", type=str, default=None)
     parser.add_argument("--hidden_dims", type=int, nargs='+', default=[512, 256])
+    parser.add_argument("--dropout", type=float, default=0.3)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--warmup_steps", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--pca_components", type=int, default=0, help="PCA components for text (0=disable)")
     args = parser.parse_args()
 
-    # --- MLflow Safety Check ---
-    if "MLFLOW_RUN_ID" in os.environ:
-        logger.warning(f"Found MLFLOW_RUN_ID in env: {os.environ['MLFLOW_RUN_ID']}. Clearing it.")
-        del os.environ["MLFLOW_RUN_ID"]
+    mlflow.set_experiment("mimic_cardiorenal_early_fusion")
     
-    if mlflow.active_run():
-        logger.warning(f"Ending active run: {mlflow.active_run().info.run_id}")
-        mlflow.end_run()
-
-    # Seeding
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-
-    # MLflow
-    mlflow.set_experiment("mimic_cardiorenal_readmission_pytorch")
-    
-    # Load Data
-    loader = FusionDataLoader()
+    loader = FusionDataLoader(embedding_dir=args.embedding_dir)
     X, y, splits, pca_explained = loader.load_and_prep_data(pca_components=args.pca_components)
     
     X_train = X[splits == 'train']

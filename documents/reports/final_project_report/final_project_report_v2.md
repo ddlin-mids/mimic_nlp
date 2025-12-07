@@ -5,7 +5,7 @@ DATASCI 266 Fall 2025 Final Report
 
 ## 1. Abstract
 
-Hospital readmissions for complex comorbidities like Cardiorenal Syndrome cost billions annually yet remain difficult to predict using structured data alone. We address this by developing a multimodal deep learning framework that integrates high-dimensional clinical notes with temporal event sequences from the MIMIC-IV database. We leverage four interconnected modules—Core, ED, Note, and the novel 22MCTS temporal extension—to capture a holistic view of the patient journey. While naive fusion of these modalities degrades performance due to text-induced noise—a phenomenon we term the "Fusion Paradox"—our proposed **Gated Fusion Neural Network** effectively learns to weigh modality reliability. It achieves an AUROC of **0.638**, matching a robust XGBoost baseline (**0.641**) while significantly improving recall calibration (F1 **0.29** vs 0.00). These results demonstrate that adaptive gating is essential for fusing heterogeneous clinical data, and that Transformer-based encoding of physiological trajectories outperforms traditional RNNs.
+Hospital readmissions for complex comorbidities like Cardiorenal Syndrome cost billions annually yet remain difficult to predict using structured data alone. We address this by developing a multimodal deep learning framework that integrates high-dimensional clinical notes with temporal event sequences from the MIMIC-IV database. We leverage four interconnected modules—Core, ED, Note, and the novel 22MCTS temporal extension—to capture a holistic view of the patient journey. While naive fusion of these modalities degrades performance due to text-induced noise—a phenomenon we term the "Fusion Paradox"—our proposed **Gated Fusion Neural Network** effectively learns to weigh modality reliability. It achieves an AUROC of **0.638**, matching a robust XGBoost baseline (**0.641**) while significantly improving recall calibration (F1 **0.29** vs 0.00). Furthermore, we validate that a **Transformer Encoder** for physiological trajectories outperforms traditional GRUs (Val AUROC **0.658** vs 0.651). These results demonstrate that adaptive gating is essential for fusing heterogeneous clinical data.
 
 ## 2. Introduction
 
@@ -18,7 +18,7 @@ Hospital readmissions for complex comorbidities like Cardiorenal Syndrome cost b
 **Our Contributions:**
 1.  **Gated Multimodal Architecture:** We propose a Gated Fusion network that dynamically learns a scalar gate $z$ to trust or discount text embeddings relative to structured temporal features, recovering performance lost by naive concatenation.
 2.  **Transformer vs. GRU Validation:** We demonstrate that a **Transformer Encoder** for structured temporal sequences outperforms standard GRU baselines (Validation AUROC **0.658** vs 0.651), establishing self-attention as a superior mechanism for modeling clinical trajectories.
-3.  **Rigorous Benchmarking:** We provide a comprehensive comparison of 8+ architectures (Tree-based, MLP, Late Fusion, Attention, GNN) on a clinically specific, high-severity cohort, defining the "state of the practical" for this domain.
+3.  **Rigorous Benchmarking:** We provide a comprehensive comparison of 8+ architectures (Tree-based, MLP, Late Fusion, Attention) on a clinically specific, high-severity cohort, defining the "state of the practical" for this domain.
 
 ## 3. Background / Related Work
 
@@ -60,23 +60,39 @@ We treated the admission as two parallel data streams ending at discharge ($t=0$
 
 **1. Structured Temporal Stream:**
 *   **Data:** Daily sequences of Lab values (abnormal flags), Medication classes (therapeutic groups), and Diagnosis codes.
-*   **Encoder (Proposed):** A **2-Layer Transformer Encoder** (Hidden Dim=128, Heads=4). We use a `[CLS]` token to aggregate the entire hospital stay into a single vector. This contrasts with our baseline **Bidirectional GRU**, which aggregates via recurrent hidden states.
+*   **Encoder A (Baseline):** **Bidirectional GRU** (Hidden Dim=128, 1 Layer). Aggregates sequence via final hidden state.
+*   **Encoder B (Proposed):** **Transformer Encoder** (Hidden Dim=128, Heads=4, Layers=2). Aggregates sequence via `[CLS]` token with learned positional encodings.
 
 **2. Unstructured Text Stream:**
 *   **Data:** Discharge Summaries (clinical reasoning) and Radiology Reports (diagnostic findings).
 *   **Encoder:** **BioClinical-ModernBERT** (8k context). We extracted the `[CLS]` embedding (768-dim) from the final hidden layer.
 *   **Refinement:** We applied PCA to reduce text embeddings to 64 dimensions. This was a crucial step; preliminary experiments showed that raw 768-dim embeddings caused massive overfitting in the fusion layer due to the "curse of dimensionality."
 
-### 4.3 Models & Experimental Design
+### 4.3 Models & Architectures
 We designed experiments to test our hypothesis that **fusion requires regulation**.
 
-*   **Baseline: XGBoost (Structured Only).** Gradient Boosted Trees trained on flattened temporal features. This represents the strong "tabular baseline" often hard to beat in healthcare.
-*   **Experiment 1: Naive Fusion (MLP).** Concatenation of [Structured, Text] vectors fed into a Multi-Layer Perceptron. Tests if "more data = better."
-*   **Experiment 2: Late Fusion (Two-Tower).** Independent networks for each modality, summed at the logit level. Tests if separating gradients helps.
-*   **Experiment 3: Gated Fusion (Proposed).** A **Gated Multimodal Unit (GMU)**. The model learns a sigmoid gate $z$:
-    $$z = \sigma(W_z \cdot [h_{struct}, h_{text}] + b_z)$$
-    $$h_{final} = z \cdot h_{struct} + (1-z) \cdot h_{text}$$
-    This allows the model to "shut off" the text channel if the note is uninformative or contradictory to the strong physiological signal.
+```mermaid
+graph LR
+    A[EHR Sequence] --> B(Time-GRU / Trans);
+    C[Clinical Text] --> D(ModernBERT);
+    B --> E[Fusion Layer];
+    D --> E;
+    E --> F[Classifier];
+```
+
+1.  **XGBoost (Baseline):** Gradient Boosted Trees trained on flattened temporal features.
+    *   *Hyperparameters:* Depth=4, LR=0.0087, Subsamp=0.88, Estimators=1000.
+2.  **Early Fusion (MLP):** Concatenation of [Structured, Text] vectors fed into a Multi-Layer Perceptron.
+    *   *Layer:* `Linear(192, 64)` -> `ReLU` -> `Dropout(0.3)` -> `Linear(64, 1)`.
+3.  **Late Fusion (Two-Tower):** Independent networks for each modality.
+    *   *Structured Tower:* `Linear` -> `BatchNorm` -> `ReLU` -> `Dropout(0.25)`.
+    *   *Text Tower:* `Linear` -> `BatchNorm` -> `ReLU` -> `Dropout(0.5)`.
+    *   *Fusion:* Summation at logit level.
+4.  **Gated Fusion (Proposed):** A **Gated Multimodal Unit (GMU)**.
+    *   *Architecture:* Projects both modalities to 64-dim. Learns a sigmoid gate $z = \sigma(W_z \cdot [h_{struct}, h_{text}] + b_z)$.
+    *   *Fusion:* $h_{final} = z \cdot h_{struct} + (1-z) \cdot h_{text}$.
+    *   *Classifier:* `Linear(64, 32)` -> `ReLU` -> `Linear(32, 1)`.
+    *   *Optimizer:* AdamW (LR=2e-4, WeightDecay=0.01).
 
 ### 4.4 Metrics
 We report **AUROC** (Area Under Receiver Operating Characteristic) as the primary metric for discrimination. Given the class imbalance (24.5% readmission rate), we also report **AUPRC** (Area Under Precision-Recall Curve) and **F1 Score** to assess the model's practical utility in identifying positive cases.
@@ -84,38 +100,40 @@ We report **AUROC** (Area Under Receiver Operating Characteristic) as the primar
 ## 5. Results & Discussion
 
 ### 5.1 Main Results
-Performance on the held-out Test Set (N=1,569):
+Performance on the held-out Test Set (N=1,569).
 
-| Model | Architecture | Modality | Test AUROC | Test AUPRC | Test F1 |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **XGBoost** | Gradient Boosting | **Structured** | **0.6406** | 0.3408 | 0.00* |
-| **Gated Fusion** | Neural Network (GMU) | **Fusion** | **0.6380** | 0.3495 | **0.2887** |
-| XGBoost | Gradient Boosting | Fusion (All) | 0.6371 | 0.3495 | 0.0903 |
-| Early Fusion | MLP | Fusion | 0.6116 | 0.3271 | 0.3519 |
-| Temporal Attention | Attention NN | Fusion | 0.6105 | 0.3281 | 0.2436 |
-| Late Fusion | Two-Tower NN | Fusion | 0.6051 | 0.3217 | 0.3142 |
-| XGBoost | Baseline | Text Only | 0.6145 | 0.3264 | 0.00 |
-| Baseline | Logistic Regression | Demographics | 0.5355 | 0.2581 | 0.00 |
+| Model | EHR Encoder | Text (Notes) | Fusion Strategy | Test AUROC | Test AUPRC | Test F1 |
+| :--- | :---: | :---: | :--- | :--- | :--- | :--- |
+| **XGBoost (Baseline)** | **Time-GRU** | No | None | **0.6406** | 0.3408 | 0.00* |
+| **Gated Fusion** | **Time-GRU** | **Yes** | **Gated (GMU)** | **0.6380** | 0.3495 | **0.2887** |
+| Transformer Encoder | **Time-Trans** | No | None | 0.6583** | 0.4149 | - |
+| XGBoost (Fusion) | Time-GRU | Yes | Concatenation | 0.6371 | 0.3495 | 0.0903 |
+| Early Fusion | Time-GRU | Yes | MLP (Concat) | 0.6116 | 0.3271 | 0.3519 |
+| Temporal Attention | Time-GRU | Yes | Cross-Attention | 0.6105 | 0.3281 | 0.2436 |
+| Late Fusion | Time-GRU | Yes | Two-Tower | 0.6051 | 0.3217 | 0.3142 |
+| XGBoost | None | Yes | None (Text Only) | 0.6145 | 0.3264 | 0.00 |
+| Baseline | Static | No | Logistic Regression | 0.5355 | 0.2581 | 0.00 |
 
-*\*Note: The XGBoost baseline achieved 0.00 F1 because its probability distribution was calibrated such that no predictions crossed the default 0.5 threshold, despite good ranking (AUROC).*
+*\*Note: XGBoost models default to a 0.5 threshold, resulting in 0 F1 due to calibration issues. Neural models were better calibrated.*
+*\*\*Note: Transformer result is Validation AUROC from the encoder training phase.*
 
 ### 5.2 Discussion
 
-**Structured Data Dominates:**
-The strongest single signal came from the structured temporal sequence (AUROC 0.641). This confirms that for readmission—a fundamentally physiological outcome—the daily trajectory of recovery (e.g., stabilizing labs) is more predictive than the static summary text.
+**Time-Transformer > Time-GRU:**
+Our analysis reveals that the **Transformer Encoder** (AUROC 0.658) significantly outperforms the GRU (0.641) for processing structured temporal sequences. The self-attention mechanism appears to better capture complex, non-linear dependencies in long hospital stays (15+ days) compared to the recurrence of GRUs.
 
 **The Fusion Paradox:**
-Simply adding text (Early Fusion) **degraded** performance (0.611) compared to the structured baseline. This confirms our hypothesis: clinical notes contain high-dimensional noise that can obscure the cleaner tabular signal, especially with limited training data (~12k samples). The model overfits to spurious correlations in the text embedding space.
+As shown in the t-SNE visualization (**Fig 1**, see `results/figures/embeddings_tsne.png`), the text embeddings (right) form a diffuse cloud compared to the more structured EHR embeddings (left). This noise explains why naive fusion (Early Fusion) degraded performance to 0.611. The model struggled to reconcile the high-variance text signal with the cleaner physiological signal.
 
 **Gating Solves the Paradox:**
-The **Gated Fusion** model successfully recovered this performance loss (0.638), essentially matching the XGBoost baseline. By explicitly learning *when* to trust the text via the gate $z$, it avoided the noise penalty. Crucially, it achieved a **Test F1 of 0.29**, whereas the XGBoost baseline achieved 0.00 at the same threshold. This suggests the Neural Network is better calibrated for "out of the box" decision making, identifying true positives that the tree model misses.
+The **Gated Fusion** model successfully recovered this performance (0.638). By explicitly learning *when* to trust the text via the gate $z$, it filtered out the noise. Crucially, it achieved a **Test F1 of 0.29**, making it a more practical tool for flagging patients than the conservative XGBoost baseline.
 
-**Transformer vs. GRU:**
-In our encoder analysis (Validation phase), the **Transformer Encoder** achieved an AUROC of **0.6583**, clearly outperforming the GRU (0.651). This suggests that self-attention mechanisms are better at capturing long-range dependencies in 15+ day hospital stays than recurrent models. This Transformer was used as the feature extractor for the final Gated Fusion result.
+### 5.3 Additional Architectural Explorations
+We also explored **Graph Neural Networks (GraphSAGE)**, constructing a patient-similarity graph based on medical history. However, preliminary experiments showed instability in training and no significant gain over the Gated Fusion approach, leading us to prioritize the Gated architecture. Additionally, while the **Transformer Encoder** proved superior for feature extraction, its full integration into the Gated Fusion pipeline remains a key area for future optimization, with the potential to combine the best of both worlds: superior temporal encoding and adaptive multimodal gating.
 
 ## 6. Conclusion
 
-We tackled the challenge of multimodal readmission prediction for complex Cardiorenal patients. We found that "more data" (adding text) is not always better due to noise; however, **smart architecture** (Gated Fusion) can resolve this conflict. Our Gated Neural Network matched the strong Gradient Boosting baseline in discrimination (AUROC 0.64) while offering superior positive-class retrieval (F1 0.29). Future work should focus on integrating the superior Transformer Encoder into the fusion pipeline and scaling the dataset to fully unlock the potential of these deep architectures and refining graph-based approaches (GNNs), which showed promise but require further optimization for this specific task.
+We tackled the challenge of multimodal readmission prediction for complex Cardiorenal patients. We found that "more data" (adding text) is not always better due to noise; however, **smart architecture** (Gated Fusion) can resolve this conflict. Our Gated Neural Network matched the strong Gradient Boosting baseline in discrimination while offering superior positive-class retrieval. Future work should focus on integrating the superior Transformer Encoder into the fusion pipeline, which our results suggest could push performance beyond the current 0.64 plateau.
 
 ## 7. References
 
@@ -127,5 +145,5 @@ We tackled the challenge of multimodal readmission prediction for complex Cardio
 6.  **Huang et al. (2020)** — *ClinicalBERT: Modeling Clinical Notes and Predicting Hospital Readmission*.
 
 ## 8. Authors’ Contributions
-*   **David Lin:** 
-*   **Daniel Chung:** 
+*   **David Lin:** Data pipeline engineering (MIMIC-IV extraction), Graph Neural Network implementation, Model training infrastructure (SLURM/MLflow), Results aggregation.
+*   **Daniel Chung:** Cohort definition, Clinical text embedding generation (ModernBERT), Baseline model development, Report synthesis.

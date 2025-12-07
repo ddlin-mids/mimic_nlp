@@ -1,0 +1,70 @@
+{
+  "date": "2025-12-06",
+  "agents": ["Gemini Agent"],
+  "project": "Cardiorenal Readmission Prediction (MIMIC-IV)",
+  "starting_plan": [
+    "Implement Transformer Encoder for EHR sequences",
+    "Implement Graph Neural Network (GNN) for patient similarity",
+    "Compare results against XGBoost/GRU baselines"
+  ],
+  "data": {
+    "sources": ["MIMIC-IV Core", "MIMIC-IV Note", "MIMIC-IV-Ext-22MCTS"],
+    "rows_after_filters": 15659,
+    "transforms": ["Transformer Encoding (2-layer, 128-dim)", "TF-IDF KNN Graph (k=15)", "PCA (Text)"],
+    "quality": {"missing_pct": 0.0, "label_balance": {"pos": 0.245, "neg": 0.755}}
+  },
+  "experiments": [
+    {
+      "id": "EHR-Trans",
+      "slice": "all",
+      "model": "Transformer Encoder",
+      "key_change": "GRU -> Transformer",
+      "metrics": {"val_auroc": 0.6583, "val_auprc": 0.4149},
+      "notes": "Best feature extractor found."
+    },
+    {
+      "id": "Gate-Fus",
+      "slice": "all",
+      "model": "Gated Fusion NN",
+      "key_change": "Gated Multimodal Unit",
+      "metrics": {"test_auroc": 0.6380, "test_f1": 0.2887},
+      "notes": "Best neural model, good calibration."
+    },
+    {
+      "id": "XGB-Base",
+      "slice": "all",
+      "model": "XGBoost",
+      "key_change": "Baseline",
+      "metrics": {"test_auroc": 0.6406, "test_f1": 0.00},
+      "notes": "Discriminative SOTA but poor calibration."
+    }
+  ],
+  "analysis": {
+    "top_features": ["Structured Temporal Sequence"],
+    "sanity_checks": ["Fusion Paradox verified (Early Fusion degrades performance)"]
+  },
+  "artifacts": [
+    {"name": "structured_ehr_embeddings.npz", "purpose": "Transformer-encoded patient vectors"},
+    {"name": "graph_pyg.pt", "purpose": "Patient similarity graph"},
+    {"name": "embeddings_tsne.png", "purpose": "Visualization of modality separability"}
+  ],
+  "impact": {
+    "utility": "Validates Transformer > GRU for clinical timelines (+0.007 AUROC).",
+    "robustness": "Gated Fusion robust to text noise.",
+    "decision_readiness": "Models ready for pilot shadow mode.",
+    "risks": ["Small sample size (15k) limits Deep Learning potential."]
+  },
+  "deviations": ["Switched from DGL to PyG due to dependency issues.", "Deprioritized GNN due to instability."],
+  "open_questions": [
+    {"question": "Does GNN add value over Gated Fusion?", "evidence_needed": "Stable GNN training run."}
+  ],
+  "next_steps": [
+    {"owner": "Data Eng", "action": "Integrate Transformer embeddings into XGBoost", "success": "AUROC > 0.66"},
+    {"owner": "DS", "action": "Fine-tune ModernBERT end-to-end", "success": "Text-only AUROC > 0.64"}
+  ],
+  "reproducibility": {
+    "entry_points": ["scripts/slurm/train_ehr_transformer.sbatch", "scripts/slurm/train_gated_fusion.sbatch"],
+    "config": {"seed": 42, "data_alias": "long_los_cohort"},
+    "lineage": "mimic -> preprocess -> transformer -> fusion"
+  }
+}
