@@ -337,7 +337,7 @@ DATASCI 266 Fall 2025 Final Report</p>
 </tr>
 <tr class="odd">
 <td style="text-align: left;">GNN (GraphSAGE)</td>
-<td style="text-align: left;">Time-Trans</td>
+<td style="text-align: left;">Time-GRU</td>
 <td style="text-align: left;">Yes</td>
 <td style="text-align: left;">Graph Conv</td>
 <td style="text-align: left;">0.5958</td>
@@ -403,7 +403,7 @@ The new <strong>Early Fusion (MLP HPO)</strong> model—an Optuna-tuned PyTorch 
 Despite extensive HPO, neither <strong>Transformer+XGBoost</strong> nor the neural fusion models consistently surpass the GRU+XGBoost baseline on test AUC. The best Transformer+XGBoost configuration reaches ~0.625 AUC, suggesting that the tree model is already well aligned with the GRU embedding geometry and that the limiting factor is likely <strong>data/label noise</strong> rather than model capacity.</p>
 <h3 id="additional-architectural-explorations">5.3 Additional Architectural Explorations</h3>
 <p><strong>Graph Neural Networks (GraphSAGE):</strong><br />
-We explored GNNs by constructing a k-nearest neighbor (k=15) patient similarity graph based on multimodal features (Transformer EHR + Text embeddings, 1664-dim). With validation-based threshold optimization, the GNN achieved a Test AUROC of <strong>0.596</strong>, AUPRC of <strong>0.319</strong>, and—notably—the <strong>highest F1 score (0.406)</strong> among all models, with recall of 0.72.</p>
+We explored GNNs by constructing a k-nearest neighbor (k=15) patient similarity graph based on multimodal features (GRU EHR + Text embeddings, 1664-dim). With validation-based threshold optimization, the GNN achieved a Test AUROC of <strong>0.596</strong>, AUPRC of <strong>0.319</strong>, and—notably—the <strong>highest F1 score (0.406)</strong> among all models, with recall of 0.72.</p>
 <p>This represents an interesting <strong>AUC-F1 trade-off</strong>: the GNN sacrifices ~0.04 AUROC compared to top models (0.64) but delivers substantially better positive-class identification. The high recall (72% of readmissions flagged) makes it attractive for <strong>high-sensitivity clinical alerting</strong> where missing a readmission is costlier than false positives.</p>
 <p>However, the lower AUC suggests that while the GNN learns to calibrate its outputs well (crossing the decision threshold for many positive cases), it is less effective at <em>ranking</em> patients by risk compared to temporal fusion approaches. The lack of explicit temporal modeling within the graph structure—where nodes represent admissions but edges encode only feature similarity, not temporal relationships—likely explains this limitation.</p>
 <p><strong>Future Work:</strong><br />

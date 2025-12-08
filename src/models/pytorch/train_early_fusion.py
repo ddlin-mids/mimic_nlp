@@ -11,13 +11,27 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.decomposition import PCA
-from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, f1_score
+from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, f1_score, precision_recall_curve, precision_score, recall_score
 from transformers import get_linear_schedule_with_warmup
 import mlflow
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def find_optimal_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> tuple:
+    """Find threshold that maximizes F1 on validation set."""
+    precision, recall, thresholds = precision_recall_curve(y_true, y_prob)
+    # Avoid division by zero
+    f1_scores = np.where(
+        (precision + recall) > 0,
+        2 * (precision * recall) / (precision + recall),
+        0
+    )
+    # precision_recall_curve returns n+1 precision/recall but n thresholds
+    best_idx = np.argmax(f1_scores[:-1])
+    return float(thresholds[best_idx]), float(f1_scores[best_idx])
 
 class ReadmissionDataset(Dataset):
     def __init__(self, X, y):
@@ -182,7 +196,7 @@ def train_epoch(model, loader, criterion, optimizer, scheduler, device):
     return total_loss / len(loader)
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device):
+def evaluate(model, loader, criterion, device, threshold=0.5):
     model.eval()
     total_loss = 0
     all_preds = []
@@ -200,13 +214,18 @@ def evaluate(model, loader, criterion, device):
         all_preds.extend(probs)
         all_targets.extend(y_batch.cpu().numpy())
         
-    all_preds = np.array(all_preds)
-    all_targets = np.array(all_targets)
+    all_preds = np.array(all_preds).flatten()
+    all_targets = np.array(all_targets).flatten()
     
     auc = roc_auc_score(all_targets, all_preds)
     auprc = average_precision_score(all_targets, all_preds)
+    preds_binary = (all_preds > threshold).astype(int)
+    f1 = f1_score(all_targets, preds_binary, zero_division=0)
+    prec = precision_score(all_targets, preds_binary, zero_division=0)
+    rec = recall_score(all_targets, preds_binary, zero_division=0)
+    acc = accuracy_score(all_targets, preds_binary)
     
-    return total_loss / len(loader), auc, auprc, all_preds, all_targets
+    return total_loss / len(loader), auc, auprc, f1, prec, rec, acc, all_preds, all_targets
 
 def main():
     parser = argparse.ArgumentParser()
@@ -220,9 +239,11 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--warmup_steps", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--embedding_type", type=str, default="GRU", choices=["GRU", "Transformer"],
+                        help="Type of embeddings being used (GRU or Transformer)")
     args = parser.parse_args()
 
-    mlflow.set_experiment("mimic_cardiorenal_early_fusion")
+    mlflow.set_experiment(f"mimic_cardiorenal_early_fusion_{args.embedding_type.lower()}")
     
     loader = FusionDataLoader(embedding_dir=args.embedding_dir)
     X, y, splits, pca_explained = loader.load_and_prep_data(pca_components=args.pca_components)
@@ -269,11 +290,14 @@ def main():
     # Training Loop
     best_val_auc = 0.0
     best_model_state = None
+    best_threshold = 0.5
     patience = 10
     no_improve = 0
     
     # Use nested=True to prevent crashes if a run is already active in the environment
     with mlflow.start_run(nested=True):
+        mlflow.set_tag("embedding_type", args.embedding_type)
+        mlflow.set_tag("model_type", "early_fusion")
         mlflow.log_params(vars(args))
         
         if pca_explained is not None:
@@ -281,7 +305,7 @@ def main():
         
         for epoch in range(args.epochs):
             train_loss = train_epoch(model, train_loader, criterion, optimizer, scheduler, device)
-            val_loss, val_auc, val_auprc, _, _ = evaluate(model, val_loader, criterion, device)
+            val_loss, val_auc, val_auprc, _, _, _, _, val_preds, val_targets = evaluate(model, val_loader, criterion, device)
             
             logger.info(f"Epoch {epoch+1}/{args.epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val AUC: {val_auc:.4f}")
             
@@ -296,6 +320,9 @@ def main():
             if val_auc > best_val_auc:
                 best_val_auc = val_auc
                 best_model_state = model.state_dict()
+                # Find optimal threshold on validation set
+                best_threshold, val_f1_at_thresh = find_optimal_threshold(val_targets, val_preds)
+                logger.info(f"  New best! Optimal threshold: {best_threshold:.3f} (Val F1: {val_f1_at_thresh:.3f})")
                 no_improve = 0
             else:
                 no_improve += 1
@@ -308,19 +335,24 @@ def main():
         if best_model_state:
             model.load_state_dict(best_model_state)
             
-        test_loss, test_auc, test_auprc, test_preds, test_targets = evaluate(model, test_loader, criterion, device)
-        test_acc = accuracy_score(test_targets, (test_preds > 0.5).astype(int))
-        test_f1 = f1_score(test_targets, (test_preds > 0.5).astype(int))
+        # Evaluate test set with optimal threshold
+        test_loss, test_auc, test_auprc, test_f1, test_prec, test_rec, test_acc, _, _ = evaluate(
+            model, test_loader, criterion, device, threshold=best_threshold
+        )
         
         logger.info(f"--- Final Test Results ---")
-        logger.info(f"AUC: {test_auc:.4f} | AUPRC: {test_auprc:.4f} | Acc: {test_acc:.4f}")
+        logger.info(f"AUC: {test_auc:.4f} | AUPRC: {test_auprc:.4f} | F1: {test_f1:.4f}")
+        logger.info(f"Precision: {test_prec:.4f} | Recall: {test_rec:.4f} | Threshold: {best_threshold:.3f}")
         
         mlflow.log_metrics({
             "test_loss": test_loss,
             "test_auc": test_auc,
             "test_auprc": test_auprc,
-            "test_accuracy": test_acc,
-            "test_f1": test_f1
+            "test_acc": test_acc,
+            "test_f1": test_f1,
+            "test_precision": test_prec,
+            "test_recall": test_rec,
+            "optimal_threshold": best_threshold
         })
         
         # Save Model

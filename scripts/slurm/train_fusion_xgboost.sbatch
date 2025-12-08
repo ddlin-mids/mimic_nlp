@@ -32,7 +32,8 @@ cd "$SLURM_SUBMIT_DIR"
 
 echo ">>> Starting XGBoost Training..."
 uv run python src/models/train_fusion_xgboost.py \
-    --embedding_dir "data/interim/ehr_long_los/embeddings_transformer"
+    --embedding_dir "data/interim/ehr_long_los/embeddings_transformer" \
+    --embedding_type Transformer
 
 echo "===================================================================="
 echo "Job Completed: $(date)"

@@ -37,7 +37,9 @@ uv run python src/models/pytorch/train_gated_fusion.py \
     --dropout 0.3 \
     --hidden_dim 64 \
     --epochs 30 \
-    --pca_components 64
+    --pca_components 64 \
+    --embedding_dir "data/interim/ehr_long_los/embeddings_transformer" \
+    --embedding_type Transformer
 
 echo "===================================================================="
 echo "Job Completed: $(date)"

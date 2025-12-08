@@ -10,7 +10,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.decomposition import PCA
-from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, accuracy_score
+from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, accuracy_score, precision_recall_curve, precision_score, recall_score
 from transformers import get_cosine_schedule_with_warmup
 import mlflow
 import mlflow.pytorch
@@ -18,6 +18,20 @@ import mlflow.pytorch
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def find_optimal_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> tuple:
+    """Find threshold that maximizes F1 on validation set."""
+    precision, recall, thresholds = precision_recall_curve(y_true, y_prob)
+    # Avoid division by zero
+    f1_scores = np.where(
+        (precision + recall) > 0,
+        2 * (precision * recall) / (precision + recall),
+        0
+    )
+    # precision_recall_curve returns n+1 precision/recall but n thresholds
+    best_idx = np.argmax(f1_scores[:-1])
+    return float(thresholds[best_idx]), float(f1_scores[best_idx])
 
 # -----------------------------------------------------------------------------
 # Gated Fusion Layer
@@ -219,7 +233,7 @@ def train_epoch(model, loader, criterion, optimizer, scheduler, device):
     return total_loss / len(loader)
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device):
+def evaluate(model, loader, criterion, device, threshold=0.5):
     model.eval()
     total_loss = 0
     all_preds = []
@@ -237,14 +251,18 @@ def evaluate(model, loader, criterion, device):
         all_preds.extend(probs)
         all_targets.extend(y.cpu().numpy())
         
-    all_preds = np.array(all_preds)
-    all_targets = np.array(all_targets)
+    all_preds = np.array(all_preds).flatten()
+    all_targets = np.array(all_targets).flatten()
     
     auc = roc_auc_score(all_targets, all_preds)
     auprc = average_precision_score(all_targets, all_preds)
-    f1 = f1_score(all_targets, (all_preds > 0.5).astype(int))
+    preds_binary = (all_preds > threshold).astype(int)
+    f1 = f1_score(all_targets, preds_binary, zero_division=0)
+    prec = precision_score(all_targets, preds_binary, zero_division=0)
+    rec = recall_score(all_targets, preds_binary, zero_division=0)
+    acc = accuracy_score(all_targets, preds_binary)
     
-    return total_loss / len(loader), auc, auprc, f1
+    return total_loss / len(loader), auc, auprc, f1, prec, rec, acc, all_preds, all_targets
 
 def main():
     parser = argparse.ArgumentParser()
@@ -256,6 +274,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--pca_components", type=int, default=64)
     parser.add_argument("--embedding_dir", type=str, default=None)
+    parser.add_argument("--embedding_type", type=str, default="GRU", choices=["GRU", "Transformer"],
+                        help="Type of embeddings being used (GRU or Transformer)")
     args = parser.parse_args()
 
     if "MLFLOW_RUN_ID" in os.environ: del os.environ["MLFLOW_RUN_ID"]
@@ -263,7 +283,7 @@ def main():
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    mlflow.set_experiment("mimic_cardiorenal_gated_fusion")
+    mlflow.set_experiment(f"mimic_cardiorenal_gated_fusion_{args.embedding_type.lower()}")
     
     loader = FusionDataLoader(embedding_dir=args.embedding_dir)
     ehr_data, txt_data, y, splits, pca_explained = loader.load_data(pca_components=args.pca_components)
@@ -301,18 +321,19 @@ def main():
     
     best_auc = 0.0
     best_state = None
+    best_threshold = 0.5
     patience = 8
     no_improve = 0
     
     with mlflow.start_run(nested=True):
-        mlflow.set_tag("embedding_source", "transformer") # We know we just generated these
+        mlflow.set_tag("embedding_type", args.embedding_type)
         mlflow.set_tag("model_type", "gated_fusion")
         mlflow.log_params(vars(args))
         if pca_explained: mlflow.log_metric("pca_explained", pca_explained)
         
         for epoch in range(args.epochs):
             train_loss = train_epoch(model, train_loader, criterion, optimizer, scheduler, device)
-            val_loss, val_auc, val_auprc, val_f1 = evaluate(model, val_loader, criterion, device)
+            val_loss, val_auc, val_auprc, val_f1, _, _, _, val_preds, val_targets = evaluate(model, val_loader, criterion, device)
             
             logger.info(f"Epoch {epoch+1} | Train: {train_loss:.4f} | Val AUC: {val_auc:.4f}")
             mlflow.log_metrics({"val_auc": val_auc, "train_loss": train_loss}, step=epoch)
@@ -320,6 +341,9 @@ def main():
             if val_auc > best_auc:
                 best_auc = val_auc
                 best_state = model.state_dict()
+                # Find optimal threshold on validation set
+                best_threshold, val_f1_at_thresh = find_optimal_threshold(val_targets, val_preds)
+                logger.info(f"  New best! Optimal threshold: {best_threshold:.3f} (Val F1: {val_f1_at_thresh:.3f})")
                 no_improve = 0
             else:
                 no_improve += 1
@@ -329,9 +353,24 @@ def main():
                 break
                 
         if best_state: model.load_state_dict(best_state)
-        _, test_auc, test_auprc, test_f1 = evaluate(model, test_loader, criterion, device)
+        
+        # Evaluate test set with optimal threshold
+        _, test_auc, test_auprc, test_f1, test_prec, test_rec, test_acc, _, _ = evaluate(
+            model, test_loader, criterion, device, threshold=best_threshold
+        )
+        
         logger.info(f"Final Test AUC: {test_auc:.4f} | AUPRC: {test_auprc:.4f} | F1: {test_f1:.4f}")
-        mlflow.log_metrics({"test_auc": test_auc, "test_auprc": test_auprc, "test_f1": test_f1})
+        logger.info(f"Precision: {test_prec:.4f} | Recall: {test_rec:.4f} | Threshold: {best_threshold:.3f}")
+        
+        mlflow.log_metrics({
+            "test_auc": test_auc, 
+            "test_auprc": test_auprc, 
+            "test_f1": test_f1,
+            "test_precision": test_prec,
+            "test_recall": test_rec,
+            "test_acc": test_acc,
+            "optimal_threshold": best_threshold
+        })
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,100 @@
+{
+  "date": "2025-12-07",
+  "agents": ["claude-code"],
+  "project": "MIMIC-IV Cardiorenal Readmission Prediction",
+  "starting_plan": [
+    "Investigate why GNN model had F1=0 despite reasonable AUROC",
+    "Fix threshold optimization for GNN predictions",
+    "Update final project report with corrected GNN results",
+    "Document AUC-F1 trade-off findings"
+  ],
+  "data": {
+    "sources": ["MIMIC-IV cardiorenal cohort"],
+    "rows_after_filters": 4271,
+    "transforms": ["None - used existing preprocessed data"],
+    "quality": {
+      "missing_pct": null,
+      "label_balance": {"pos": 0.18, "neg": 0.82}
+    }
+  },
+  "experiments": [
+    {
+      "id": "GNN-threshold-fix",
+      "slice": "test",
+      "model": "GNN (GAT + GRU embeddings)",
+      "key_change": "Added find_optimal_threshold() using PR curve",
+      "metrics": {
+        "auroc": 0.596,
+        "auprc": 0.305,
+        "f1": 0.406,
+        "precision": 0.280,
+        "recall": 0.718,
+        "optimal_threshold": 0.505
+      },
+      "notes": "F1 improved from 0.0 to 0.406; highest F1 among all models"
+    }
+  ],
+  "analysis": {
+    "top_features": ["GNN leverages patient similarity graph structure"],
+    "sanity_checks": ["Threshold near 0.5 indicates reasonable calibration"]
+  },
+  "artifacts": [
+    {"name": "src/models/pytorch/train_gnn.py", "purpose": "Added threshold optimization"},
+    {"name": "src/models/pytorch/train_gnn_hpo.py", "purpose": "Same threshold fix for HPO"},
+    {"name": "final_project_report_v2.md", "purpose": "Updated results table and analysis"},
+    {"name": "final_project_report_v2.html", "purpose": "Rebuilt HTML with mermaid diagrams"}
+  ],
+  "impact": {
+    "utility": "GNN F1 improved from 0.0 to 0.406 (best among all models)",
+    "robustness": "Single seed; threshold stable near 0.5",
+    "decision_readiness": "GNN now viable for high-sensitivity alerting",
+    "risks": ["High recall (72%) comes with low precision (28%); more false alarms"]
+  },
+  "deviations": [
+    "Deferred MIMIC-IV-Ext-22MCTS integration to prioritize GNN fix",
+    "Did not re-run HPO with threshold optimization"
+  ],
+  "open_questions": [
+    {
+      "question": "Would threshold optimization improve other models?",
+      "evidence_needed": "Apply same technique to XGBoost, Gated Fusion"
+    },
+    {
+      "question": "Is GNN's high recall due to threshold or architecture?",
+      "evidence_needed": "Compare probability distributions across models"
+    },
+    {
+      "question": "How does GNN perform with Transformer embeddings?",
+      "evidence_needed": "Modify preprocess_graph.py to use Transformer embeddings"
+    }
+  ],
+  "next_steps": [
+    {
+      "owner": "agent",
+      "action": "Apply threshold optimization to other fusion models",
+      "success": "All models report metrics at optimal threshold"
+    },
+    {
+      "owner": "agent",
+      "action": "Integrate MIMIC-IV-Ext-22MCTS temporal clinical events",
+      "success": "New embeddings improve AUROC by 0.02+"
+    },
+    {
+      "owner": "agent",
+      "action": "Ensemble GNN (high recall) with XGBoost (high precision)",
+      "success": "Ensemble AUROC > 0.65"
+    }
+  ],
+  "reproducibility": {
+    "entry_points": [
+      "sbatch scripts/slurm/train_gnn.sbatch",
+      "bash scripts/build_report.sh"
+    ],
+    "config": {
+      "seed": 42,
+      "data_alias": "ehr_long_los",
+      "optimal_threshold": 0.505
+    },
+    "lineage": "MIMIC-IV -> get_mimic_cohort.py -> preprocess_ehr.py -> train_ehr_encoder.py (GRU) -> preprocess_graph.py -> train_gnn.py"
+  }
+}

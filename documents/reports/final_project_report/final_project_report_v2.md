@@ -163,7 +163,7 @@ Performance on the held-out Test Set (N=1,569), using train+val for tuning and a
 | XGBoost (Text Only)       | None               | Yes          | None             | 0.6145     | 0.3264     | 0.00*   |
 | Early Fusion (MLP)        | Time-GRU           | Yes          | MLP (Concat)     | 0.6116     | 0.3271     | 0.3519  |
 | Late Fusion (2-Tower)     | Time-GRU           | Yes          | Two-Tower        | 0.6051     | 0.3217     | 0.3142  |
-| GNN (GraphSAGE)           | Time-Trans         | Yes          | Graph Conv       | 0.5958     | 0.3192     | **0.4056** |
+| GNN (GraphSAGE)           | Time-GRU           | Yes          | Graph Conv       | 0.5958     | 0.3192     | **0.4056** |
 | Baseline (Static LR)      | Static             | No           | Logistic Regression | 0.5355  | 0.2581     | 0.00    |
 
 *\*Note: XGBoost models use a fixed 0.5 threshold, resulting in F1=0 due to conservative probability calibration. GNN uses validation-optimized threshold (0.505) achieving highest F1 but with an AUC/F1 trade-off.*
@@ -225,7 +225,7 @@ Despite extensive HPO, neither **Transformer+XGBoost** nor the neural fusion mod
 ### 5.3 Additional Architectural Explorations
 
 **Graph Neural Networks (GraphSAGE):**  
-We explored GNNs by constructing a k-nearest neighbor (k=15) patient similarity graph based on multimodal features (Transformer EHR + Text embeddings, 1664-dim). With validation-based threshold optimization, the GNN achieved a Test AUROC of **0.596**, AUPRC of **0.319**, and—notably—the **highest F1 score (0.406)** among all models, with recall of 0.72.
+We explored GNNs by constructing a k-nearest neighbor (k=15) patient similarity graph based on multimodal features (GRU EHR + Text embeddings, 1664-dim). With validation-based threshold optimization, the GNN achieved a Test AUROC of **0.596**, AUPRC of **0.319**, and—notably—the **highest F1 score (0.406)** among all models, with recall of 0.72.
 
 This represents an interesting **AUC-F1 trade-off**: the GNN sacrifices ~0.04 AUROC compared to top models (0.64) but delivers substantially better positive-class identification. The high recall (72% of readmissions flagged) makes it attractive for **high-sensitivity clinical alerting** where missing a readmission is costlier than false positives.
 

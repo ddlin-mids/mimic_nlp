@@ -6,7 +6,7 @@ import pandas as pd
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
-from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, f1_score
+from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, f1_score, precision_recall_curve, precision_score, recall_score
 import xgboost as xgb
 import mlflow
 import mlflow.xgboost
@@ -14,6 +14,20 @@ import mlflow.xgboost
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def find_optimal_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> tuple:
+    """Find threshold that maximizes F1 on validation set."""
+    precision, recall, thresholds = precision_recall_curve(y_true, y_prob)
+    # Avoid division by zero
+    f1_scores = np.where(
+        (precision + recall) > 0,
+        2 * (precision * recall) / (precision + recall),
+        0
+    )
+    # precision_recall_curve returns n+1 precision/recall but n thresholds
+    best_idx = np.argmax(f1_scores[:-1])
+    return float(thresholds[best_idx]), float(f1_scores[best_idx])
 
 class FusionDataLoader:
     def __init__(self, base_dir=".", embedding_dir=None):
@@ -122,41 +136,54 @@ class FusionDataLoader:
                    for tid in target_ids]
         return np.array(aligned)
 
-def train_and_evaluate(X_train, y_train, X_test, y_test, params, run_name):
+def train_and_evaluate(X_train, y_train, X_val, y_val, X_test, y_test, params, run_name, embedding_type):
     with mlflow.start_run(run_name=run_name):
         mlflow.log_params(params)
         mlflow.log_param("n_features", X_train.shape[1])
+        mlflow.set_tag("embedding_type", embedding_type)
         
-        # Use Test set for early stopping to simulate "best possible generalization" check
-        # In strict practice, we should split Train further, but for ablation comparison consistency is key.
+        # Use validation set for early stopping
         model = xgb.XGBClassifier(**params)
         model.fit(
             X_train, y_train,
-            eval_set=[(X_test, y_test)],
+            eval_set=[(X_val, y_val)],
             verbose=False
         )
         
-        preds_prob = model.predict_proba(X_test)[:, 1]
-        preds_class = model.predict(X_test)
+        # Find optimal threshold on validation set
+        val_preds_prob = model.predict_proba(X_val)[:, 1]
+        optimal_threshold, val_f1_at_thresh = find_optimal_threshold(y_val, val_preds_prob)
+        logger.info(f"  Optimal threshold: {optimal_threshold:.3f} (Val F1: {val_f1_at_thresh:.3f})")
+        
+        # Evaluate on test set with optimal threshold
+        test_preds_prob = model.predict_proba(X_test)[:, 1]
+        test_preds_class = (test_preds_prob > optimal_threshold).astype(int)
         
         metrics = {
-            "test_auc": roc_auc_score(y_test, preds_prob),
-            "test_auprc": average_precision_score(y_test, preds_prob),
-            "test_accuracy": accuracy_score(y_test, preds_class),
-            "test_f1": f1_score(y_test, preds_class)
+            "test_auc": roc_auc_score(y_test, test_preds_prob),
+            "test_auprc": average_precision_score(y_test, test_preds_prob),
+            "test_acc": accuracy_score(y_test, test_preds_class),
+            "test_f1": f1_score(y_test, test_preds_class, zero_division=0),
+            "test_precision": precision_score(y_test, test_preds_class, zero_division=0),
+            "test_recall": recall_score(y_test, test_preds_class, zero_division=0),
+            "optimal_threshold": optimal_threshold
         }
         
         mlflow.log_metrics(metrics)
-        logger.info(f"[{run_name}] AUC: {metrics['test_auc']:.4f} | AUPRC: {metrics['test_auprc']:.4f}")
+        logger.info(f"[{run_name}] AUC: {metrics['test_auc']:.4f} | AUPRC: {metrics['test_auprc']:.4f} | F1: {metrics['test_f1']:.4f}")
+        logger.info(f"  Precision: {metrics['test_precision']:.4f} | Recall: {metrics['test_recall']:.4f} | Threshold: {optimal_threshold:.3f}")
         
         return metrics
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--embedding_dir", type=str, default=None, help="Path to structured embeddings dir")
+    parser.add_argument("--embedding_type", type=str, default="GRU", choices=["GRU", "Transformer"], 
+                        help="Type of embeddings being used (GRU or Transformer)")
     args = parser.parse_args()
 
-    mlflow.set_experiment("mimic_cardiorenal_ablation")
+    # Set experiment name with embedding type
+    mlflow.set_experiment(f"mimic_cardiorenal_ablation_{args.embedding_type.lower()}")
     
     loader = FusionDataLoader(embedding_dir=args.embedding_dir)
     data_dict = loader.load_data_dict()
@@ -179,15 +206,16 @@ def main():
         'random_state': 42
     }
     
-    # Define Ablation Experiments
+    # Define Ablation Experiments (with embedding type in names)
+    emb_label = args.embedding_type
     experiments = {
         "Baseline (Demo)": ["demographics"],
         "Static EHR": ["demographics", "static_ehr"],
-        "Structured EHR (GRU)": ["demographics", "structured_ehr"],
+        f"Structured EHR ({emb_label})": ["demographics", "structured_ehr"],
         "Discharge Notes": ["demographics", "discharge_notes"],
         "Radiology Notes": ["demographics", "radiology_notes"],
         "All Notes": ["demographics", "discharge_notes", "radiology_notes"],
-        "Full Fusion": ["demographics", "static_ehr", "structured_ehr", "discharge_notes", "radiology_notes"]
+        f"Full Fusion ({emb_label})": ["demographics", "static_ehr", "structured_ehr", "discharge_notes", "radiology_notes"]
     }
     
     results = {}
@@ -201,10 +229,12 @@ def main():
         
         X_train = X[splits == 'train']
         y_train = y[splits == 'train']
+        X_val = X[splits == 'val']
+        y_val = y[splits == 'val']
         X_test = X[splits == 'test']
         y_test = y[splits == 'test']
         
-        metrics = train_and_evaluate(X_train, y_train, X_test, y_test, best_params, exp_name)
+        metrics = train_and_evaluate(X_train, y_train, X_val, y_val, X_test, y_test, best_params, exp_name, args.embedding_type)
         results[exp_name] = metrics['test_auc']
 
     logger.info("--- Ablation Summary (Test AUC) ---")
