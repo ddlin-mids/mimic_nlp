@@ -155,18 +155,18 @@ Performance on the held-out Test Set (N=1,569), using train+val for tuning and a
 | :------------------------ | :------------------ | :----------- | :--------------- | :--------- | :--------- | :------ |
 | **XGBoost (Baseline)**    | **Time-GRU**        | No           | None             | **0.6406** | 0.3408     | 0.00*   |
 | **Gated Fusion**          | **Time-GRU**        | **Yes**      | **Gated (GMU)**  | **0.6380** | 0.3495     | 0.2887  |
-| Early Fusion (MLP, HPO)   | Time-Trans         | Yes          | MLP (Concat)     | 0.6378     | 0.3541     | **0.3465** |
+| Early Fusion (MLP, HPO)   | Time-Trans         | Yes          | MLP (Concat)     | 0.6378     | 0.3541     | 0.3465  |
 | XGBoost (Fusion)          | Time-GRU           | Yes          | Concatenation    | 0.6371     | 0.3495     | 0.0903  |
 | Gated Fusion (Optuna)     | Time-Trans         | Yes          | Gated (GMU)      | 0.6316     | **0.3613** | 0.2947  |
 | Temporal Attention        | Time-Trans         | Yes          | Cross-Attention  | 0.6307     | 0.3464     | 0.1801  |
 | XGBoost (Fusion, Transf.) | Time-Trans         | Yes          | Concatenation    | 0.6297     | 0.3577     | 0.2564  |
-| GNN (GraphSAGE)           | Time-Trans         | Yes          | Graph Conv       | 0.6239     | 0.3351     | 0.0000* |
+| XGBoost (Text Only)       | None               | Yes          | None             | 0.6145     | 0.3264     | 0.00*   |
 | Early Fusion (MLP)        | Time-GRU           | Yes          | MLP (Concat)     | 0.6116     | 0.3271     | 0.3519  |
 | Late Fusion (2-Tower)     | Time-GRU           | Yes          | Two-Tower        | 0.6051     | 0.3217     | 0.3142  |
-| XGBoost (Text Only)       | None               | Yes          | None             | 0.6145     | 0.3264     | 0.00    |
+| GNN (GraphSAGE)           | Time-Trans         | Yes          | Graph Conv       | 0.5958     | 0.3192     | **0.4056** |
 | Baseline (Static LR)      | Static             | No           | Logistic Regression | 0.5355  | 0.2581     | 0.00    |
 
-*\*Note: XGBoost models default to a 0.5 threshold, resulting in 0 F1 due to conservative calibration. Neural models are better calibrated and tuned via validation.*
+*\*Note: XGBoost models use a fixed 0.5 threshold, resulting in F1=0 due to conservative probability calibration. GNN uses validation-optimized threshold (0.505) achieving highest F1 but with an AUC/F1 trade-off.*
 
 **Figure 3: Top Model Performance Comparison**
 ```
@@ -192,12 +192,12 @@ Baseline (Static LR)    ██████████████████�
 
 Test F1 Score (higher is better)
 ──────────────────────────────────────────────────────────────
-Early Fusion MLP (HPO)  ████████████████████████████████ 0.347
-Early Fusion (MLP)      ████████████████████████████████ 0.352
-Late Fusion (2-Tower)   ████████████████████████████▊    0.314
-Gated Fusion (Optuna)   ██████████████████████████▋      0.295
-Gated Fusion (GRU)      █████████████████████████▊       0.289
-XGBoost (GRU)           ▏                                0.000*
+GNN (GraphSAGE)         ████████████████████████████████ 0.406
+Early Fusion (MLP)      ███████████████████████████▊     0.352
+Early Fusion MLP (HPO)  ███████████████████████████▍     0.347
+Late Fusion (2-Tower)   █████████████████████████▍       0.314
+Gated Fusion (Optuna)   ████████████████████████         0.295
+Gated Fusion (GRU)      ███████████████████████▌         0.289
 ──────────────────────────────────────────────────────────────
 ```
 
@@ -223,7 +223,16 @@ The new **Early Fusion (MLP HPO)** model—an Optuna-tuned PyTorch MLP over [Tra
 Despite extensive HPO, neither **Transformer+XGBoost** nor the neural fusion models consistently surpass the GRU+XGBoost baseline on test AUC. The best Transformer+XGBoost configuration reaches ~0.625 AUC, suggesting that the tree model is already well aligned with the GRU embedding geometry and that the limiting factor is likely **data/label noise** rather than model capacity.
 
 ### 5.3 Additional Architectural Explorations
-We explored **Graph Neural Networks (GraphSAGE)** by constructing a k-nearest neighbor (k=15) patient similarity graph based on multimodal features (Transformer EHR + Text). The optimized GNN achieved a Test AUROC of **0.6239** and AUPRC of **0.3351**, performing comparably to the Transformer-based XGBoost model but slightly below the Gated Fusion approach. The model's low F1 score (0.00 at default threshold) indicates conservative calibration due to class imbalance, similar to the XGBoost baseline. While the GNN effectively captures patient similarity, the lack of explicit temporal modeling within the graph structure likely limited its performance compared to our temporally-aware fusion architectures. Additionally, while the **Transformer Encoder** proved superior for feature extraction, its full integration into the fusion pipeline via end-to-end training (jointly optimizing encoder and fusion head) remains a key area for future work.
+
+**Graph Neural Networks (GraphSAGE):**  
+We explored GNNs by constructing a k-nearest neighbor (k=15) patient similarity graph based on multimodal features (Transformer EHR + Text embeddings, 1664-dim). With validation-based threshold optimization, the GNN achieved a Test AUROC of **0.596**, AUPRC of **0.319**, and—notably—the **highest F1 score (0.406)** among all models, with recall of 0.72.
+
+This represents an interesting **AUC-F1 trade-off**: the GNN sacrifices ~0.04 AUROC compared to top models (0.64) but delivers substantially better positive-class identification. The high recall (72% of readmissions flagged) makes it attractive for **high-sensitivity clinical alerting** where missing a readmission is costlier than false positives.
+
+However, the lower AUC suggests that while the GNN learns to calibrate its outputs well (crossing the decision threshold for many positive cases), it is less effective at *ranking* patients by risk compared to temporal fusion approaches. The lack of explicit temporal modeling within the graph structure—where nodes represent admissions but edges encode only feature similarity, not temporal relationships—likely explains this limitation.
+
+**Future Work:**  
+The Transformer Encoder proved superior for feature extraction, but its full integration into the fusion pipeline via end-to-end training (jointly optimizing encoder and fusion head) remains a key area for future work. Additionally, incorporating temporal edges into the GNN (e.g., linking sequential admissions for the same patient) could combine the benefits of graph-based patient similarity with temporal awareness.
 
 ### 5.4 Model Selection & Deployment Recommendations
 
@@ -236,8 +245,8 @@ Given the close clustering of top models around AUROC ≈ 0.63–0.64, we view *
   - It is simple to deploy, fast at inference, and consistently delivers the best or near-best AUROC (0.6406) with stable behavior across ablations.
 
 - **High-recall alerting (who to flag for follow-up):**  
-  - Prefer **Early Fusion MLP (HPO, Transformer EHR + Text)** as the default neural candidate.  
-  - It nearly matches GRU+XGBoost and GRU Gated Fusion on AUROC (0.6378) but has the strongest F1 and robust AUPRC, making it attractive when recall on positives matters.
+  - For **maximum recall** (72%), consider **GNN (GraphSAGE)** with threshold-optimized predictions—it achieves the highest F1 (0.41) at the cost of lower AUC (0.596).
+  - For a **balanced approach**, prefer **Early Fusion MLP (HPO)** which nearly matches top AUC (0.638) while maintaining strong F1 (0.35).
   - For users who want an explicit gating mechanism, **GRU Gated Fusion** remains an excellent alternative with similar AUC and slightly lower but still strong F1.
 
 - **Interpretability-sensitive settings:**  

@@ -8,9 +8,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv
-from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
+from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, precision_recall_curve
 import mlflow
 import mlflow.pytorch
+
+
+def find_optimal_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> tuple[float, float]:
+    """Find threshold that maximizes F1 on validation set."""
+    precision, recall, thresholds = precision_recall_curve(y_true, y_prob)
+    # Avoid division by zero
+    f1_scores = np.where(
+        (precision + recall) > 0,
+        2 * (precision * recall) / (precision + recall),
+        0
+    )
+    # precision_recall_curve returns n+1 precision/recall but n thresholds
+    best_idx = np.argmax(f1_scores[:-1])
+    return float(thresholds[best_idx]), float(f1_scores[best_idx])
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -175,18 +189,26 @@ def train_model(args):
                     best_val_auc = val_auc
                     no_improve = 0
                     
-                    # Compute all metrics
+                    # Get validation probabilities for threshold tuning
+                    val_probs_np = probs[val_mask].cpu().numpy()
+                    val_y_np = y[val_mask].cpu().numpy()
+                    
+                    # Find optimal threshold on validation set
+                    optimal_threshold, val_f1_at_thresh = find_optimal_threshold(val_y_np, val_probs_np)
+                    logger.info(f"  Optimal threshold: {optimal_threshold:.3f} (Val F1: {val_f1_at_thresh:.3f})")
+                    
+                    # Compute test metrics using optimal threshold
                     test_probs = probs[test_mask].cpu().numpy()
                     test_y = y[test_mask].cpu().numpy()
-                    test_preds = (test_probs > 0.5).astype(int)
+                    test_preds = (test_probs > optimal_threshold).astype(int)
                     
                     test_auc = float(roc_auc_score(test_y, test_probs))
                     test_ap = float(average_precision_score(test_y, test_probs))
-                    test_f1 = float(f1_score(test_y, test_preds))
+                    test_f1 = float(f1_score(test_y, test_preds, zero_division=0))
                     
                     from sklearn.metrics import precision_score, recall_score, accuracy_score
                     test_precision = float(precision_score(test_y, test_preds, zero_division=0))
-                    test_recall = float(recall_score(test_y, test_preds))
+                    test_recall = float(recall_score(test_y, test_preds, zero_division=0))
                     test_acc = float(accuracy_score(test_y, test_preds))
                     
                     mlflow.log_metrics({
@@ -195,7 +217,9 @@ def train_model(args):
                         "test_f1": test_f1,
                         "test_precision": test_precision,
                         "test_recall": test_recall,
-                        "test_acc": test_acc
+                        "test_acc": test_acc,
+                        "optimal_threshold": optimal_threshold,
+                        "val_f1_at_threshold": val_f1_at_thresh
                     })
                 else:
                     no_improve += 1

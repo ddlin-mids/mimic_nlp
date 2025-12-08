@@ -180,6 +180,7 @@
 </ul></li>
 <li><a href="#conclusion">6. Conclusion</a></li>
 <li><a href="#references">7. References</a></li>
+<li><a href="#authors-contributions">8. Authors’ Contributions</a></li>
 </ul></li>
 </ul>
 </nav>
@@ -269,7 +270,7 @@ DATASCI 266 Fall 2025 Final Report</p>
 <td style="text-align: left;">MLP (Concat)</td>
 <td style="text-align: left;">0.6378</td>
 <td style="text-align: left;">0.3541</td>
-<td style="text-align: left;"><strong>0.3465</strong></td>
+<td style="text-align: left;">0.3465</td>
 </tr>
 <tr class="even">
 <td style="text-align: left;">XGBoost (Fusion)</td>
@@ -308,6 +309,15 @@ DATASCI 266 Fall 2025 Final Report</p>
 <td style="text-align: left;">0.2564</td>
 </tr>
 <tr class="even">
+<td style="text-align: left;">XGBoost (Text Only)</td>
+<td style="text-align: left;">None</td>
+<td style="text-align: left;">Yes</td>
+<td style="text-align: left;">None</td>
+<td style="text-align: left;">0.6145</td>
+<td style="text-align: left;">0.3264</td>
+<td style="text-align: left;">0.00*</td>
+</tr>
+<tr class="odd">
 <td style="text-align: left;">Early Fusion (MLP)</td>
 <td style="text-align: left;">Time-GRU</td>
 <td style="text-align: left;">Yes</td>
@@ -316,7 +326,7 @@ DATASCI 266 Fall 2025 Final Report</p>
 <td style="text-align: left;">0.3271</td>
 <td style="text-align: left;">0.3519</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td style="text-align: left;">Late Fusion (2-Tower)</td>
 <td style="text-align: left;">Time-GRU</td>
 <td style="text-align: left;">Yes</td>
@@ -325,16 +335,16 @@ DATASCI 266 Fall 2025 Final Report</p>
 <td style="text-align: left;">0.3217</td>
 <td style="text-align: left;">0.3142</td>
 </tr>
-<tr class="even">
-<td style="text-align: left;">XGBoost (Text Only)</td>
-<td style="text-align: left;">None</td>
-<td style="text-align: left;">Yes</td>
-<td style="text-align: left;">None</td>
-<td style="text-align: left;">0.6145</td>
-<td style="text-align: left;">0.3264</td>
-<td style="text-align: left;">0.00</td>
-</tr>
 <tr class="odd">
+<td style="text-align: left;">GNN (GraphSAGE)</td>
+<td style="text-align: left;">Time-Trans</td>
+<td style="text-align: left;">Yes</td>
+<td style="text-align: left;">Graph Conv</td>
+<td style="text-align: left;">0.5958</td>
+<td style="text-align: left;">0.3192</td>
+<td style="text-align: left;"><strong>0.4056</strong></td>
+</tr>
+<tr class="even">
 <td style="text-align: left;">Baseline (Static LR)</td>
 <td style="text-align: left;">Static</td>
 <td style="text-align: left;">No</td>
@@ -345,7 +355,7 @@ DATASCI 266 Fall 2025 Final Report</p>
 </tr>
 </tbody>
 </table>
-<p><em>*Note: XGBoost models default to a 0.5 threshold, resulting in 0 F1 due to conservative calibration. Neural models are better calibrated and tuned via validation.</em></p>
+<p><em>*Note: XGBoost models use a fixed 0.5 threshold, resulting in F1=0 due to conservative probability calibration. GNN uses validation-optimized threshold (0.505) achieving highest F1 but with an AUC/F1 trade-off.</em></p>
 <p><strong>Figure 3: Top Model Performance Comparison</strong></p>
 <pre><code>Test AUROC (higher is better)
 ──────────────────────────────────────────────────────────────
@@ -369,12 +379,12 @@ Baseline (Static LR)    ██████████████████�
 
 Test F1 Score (higher is better)
 ──────────────────────────────────────────────────────────────
-Early Fusion MLP (HPO)  ████████████████████████████████ 0.347
-Early Fusion (MLP)      ████████████████████████████████ 0.352
-Late Fusion (2-Tower)   ████████████████████████████▊    0.314
-Gated Fusion (Optuna)   ██████████████████████████▋      0.295
-Gated Fusion (GRU)      █████████████████████████▊       0.289
-XGBoost (GRU)           ▏                                0.000*
+GNN (GraphSAGE)         ████████████████████████████████ 0.406
+Early Fusion (MLP)      ███████████████████████████▊     0.352
+Early Fusion MLP (HPO)  ███████████████████████████▍     0.347
+Late Fusion (2-Tower)   █████████████████████████▍       0.314
+Gated Fusion (Optuna)   ████████████████████████         0.295
+Gated Fusion (GRU)      ███████████████████████▌         0.289
 ──────────────────────────────────────────────────────────────</code></pre>
 <p><strong>Standalone Encoder Quality</strong></p>
 <ul>
@@ -392,7 +402,12 @@ The new <strong>Early Fusion (MLP HPO)</strong> model—an Optuna-tuned PyTorch 
 <p><strong>Why XGBoost Still Wins on AUC:</strong><br />
 Despite extensive HPO, neither <strong>Transformer+XGBoost</strong> nor the neural fusion models consistently surpass the GRU+XGBoost baseline on test AUC. The best Transformer+XGBoost configuration reaches ~0.625 AUC, suggesting that the tree model is already well aligned with the GRU embedding geometry and that the limiting factor is likely <strong>data/label noise</strong> rather than model capacity.</p>
 <h3 id="additional-architectural-explorations">5.3 Additional Architectural Explorations</h3>
-<p>We also explored <strong>Graph Neural Networks (GraphSAGE)</strong>, constructing a patient-similarity graph based on medical history. However, preliminary experiments showed instability in training and no significant gain over the Gated Fusion approach, leading us to prioritize the Gated and MLP fusion architectures. Additionally, while the <strong>Transformer Encoder</strong> proved superior for feature extraction, its full integration into the fusion pipeline via end-to-end training (jointly optimizing encoder and fusion head) remains a key area for future work, with the potential to combine the best of both worlds: superior temporal encoding and adaptive multimodal gating.</p>
+<p><strong>Graph Neural Networks (GraphSAGE):</strong><br />
+We explored GNNs by constructing a k-nearest neighbor (k=15) patient similarity graph based on multimodal features (Transformer EHR + Text embeddings, 1664-dim). With validation-based threshold optimization, the GNN achieved a Test AUROC of <strong>0.596</strong>, AUPRC of <strong>0.319</strong>, and—notably—the <strong>highest F1 score (0.406)</strong> among all models, with recall of 0.72.</p>
+<p>This represents an interesting <strong>AUC-F1 trade-off</strong>: the GNN sacrifices ~0.04 AUROC compared to top models (0.64) but delivers substantially better positive-class identification. The high recall (72% of readmissions flagged) makes it attractive for <strong>high-sensitivity clinical alerting</strong> where missing a readmission is costlier than false positives.</p>
+<p>However, the lower AUC suggests that while the GNN learns to calibrate its outputs well (crossing the decision threshold for many positive cases), it is less effective at <em>ranking</em> patients by risk compared to temporal fusion approaches. The lack of explicit temporal modeling within the graph structure—where nodes represent admissions but edges encode only feature similarity, not temporal relationships—likely explains this limitation.</p>
+<p><strong>Future Work:</strong><br />
+The Transformer Encoder proved superior for feature extraction, but its full integration into the fusion pipeline via end-to-end training (jointly optimizing encoder and fusion head) remains a key area for future work. Additionally, incorporating temporal edges into the GNN (e.g., linking sequential admissions for the same patient) could combine the benefits of graph-based patient similarity with temporal awareness.</p>
 <h3 id="model-selection-deployment-recommendations">5.4 Model Selection &amp; Deployment Recommendations</h3>
 <p>Given the close clustering of top models around AUROC ≈ 0.63–0.64, we view <strong>operating point, calibration, and complexity</strong> as more important than squeezing out another 0.001 of AUC.</p>
 <p><strong>Primary recommendations</strong></p>
@@ -405,9 +420,8 @@ Despite extensive HPO, neither <strong>Transformer+XGBoost</strong> nor the neur
 </ul></li>
 <li><strong>High-recall alerting (who to flag for follow-up):</strong>
 <ul>
-<li>Prefer <strong>Early Fusion MLP (HPO, Transformer EHR + Text)</strong> as the default neural candidate.<br />
-</li>
-<li>It nearly matches GRU+XGBoost and GRU Gated Fusion on AUROC (0.6378) but has the strongest F1 and robust AUPRC, making it attractive when recall on positives matters.</li>
+<li>For <strong>maximum recall</strong> (72%), consider <strong>GNN (GraphSAGE)</strong> with threshold-optimized predictions—it achieves the highest F1 (0.41) at the cost of lower AUC (0.596).</li>
+<li>For a <strong>balanced approach</strong>, prefer <strong>Early Fusion MLP (HPO)</strong> which nearly matches top AUC (0.638) while maintaining strong F1 (0.35).</li>
 <li>For users who want an explicit gating mechanism, <strong>GRU Gated Fusion</strong> remains an excellent alternative with similar AUC and slightly lower but still strong F1.</li>
 </ul></li>
 <li><strong>Interpretability-sensitive settings:</strong>
@@ -436,5 +450,10 @@ Despite extensive HPO, neither <strong>Transformer+XGBoost</strong> nor the neur
 <li><strong>Licerio (2024)</strong> — <em>Predicting 30-Day Unplanned ICU Readmissions Using Deep Learning and NLP: A MIMIC-IV Analysis</em>.</li>
 <li><strong>Huang et al. (2020)</strong> — <em>ClinicalBERT: Modeling Clinical Notes and Predicting Hospital Readmission</em>.</li>
 </ol>
+<h2 id="authors-contributions">8. Authors’ Contributions</h2>
+<ul>
+<li><strong>David Lin:</strong> Data pipeline engineering (MIMIC-IV extraction), Graph Neural Network implementation, Model training infrastructure (SLURM/MLflow), Results aggregation.</li>
+<li><strong>Daniel Chung:</strong> Cohort definition, Clinical text embedding generation (ModernBERT), Baseline model development, Report synthesis.</li>
+</ul>
 </body>
 </html>

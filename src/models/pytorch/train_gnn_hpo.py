@@ -10,10 +10,22 @@ import optuna
 import mlflow
 from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv
-from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
+from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, precision_recall_curve
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def find_optimal_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> tuple[float, float]:
+    """Find threshold that maximizes F1 on validation set."""
+    precision, recall, thresholds = precision_recall_curve(y_true, y_prob)
+    f1_scores = np.where(
+        (precision + recall) > 0,
+        2 * (precision * recall) / (precision + recall),
+        0
+    )
+    best_idx = np.argmax(f1_scores[:-1])
+    return float(thresholds[best_idx]), float(f1_scores[best_idx])
 
 # Reusing the GNNClassifier from train_gnn.py
 class GNNClassifier(torch.nn.Module):
