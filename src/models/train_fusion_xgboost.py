@@ -62,7 +62,7 @@ class FusionDataLoader:
         # 2. Static EHR
         static_embeds = self._load_aligned_embeddings(self.static_ehr_path, hadm_ids)
         
-        # 3. Structured EHR (GRU)
+        # 3. Structured EHR (Transformer)
         struct_embeds = self._load_structured_ehr(hadm_ids)
         
         # 4. Discharge Notes
@@ -178,7 +178,7 @@ def train_and_evaluate(X_train, y_train, X_val, y_val, X_test, y_test, params, r
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--embedding_dir", type=str, default=None, help="Path to structured embeddings dir")
-    parser.add_argument("--embedding_type", type=str, default="GRU", choices=["GRU", "Transformer"], 
+    parser.add_argument("--embedding_type", type=str, default="Transformer", choices=["GRU", "Transformer"], 
                         help="Type of embeddings being used (GRU or Transformer)")
     args = parser.parse_args()
 
