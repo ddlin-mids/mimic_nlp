@@ -44,6 +44,7 @@ class FusionDataLoader:
         self.static_ehr_path = self.base_dir / "data/interim/ehr_long_los/embeddings/static_ehr_embeddings.npz"
         self.discharge_path = self.base_dir / "data/interim/embeddings/notes/discharge_summary.npz"
         self.radiology_path = self.base_dir / "data/interim/embeddings/notes/radiology_report.npz"
+        self.clinical_events_path = self.base_dir / "data/interim/embeddings/notes/clinical_events.npz"
 
     def load_data_dict(self):
         """Returns a dictionary of features by modality"""
@@ -70,6 +71,9 @@ class FusionDataLoader:
         
         # 5. Radiology Notes
         rad_embeds = self._load_radiology_embeddings(hadm_ids)
+        
+        # 6. Clinical Events (from MIMIC-IV-Ext-22MCTS)
+        clinical_events_embeds = self._load_aligned_embeddings(self.clinical_events_path, hadm_ids)
 
         return {
             "demographics": demo_features,
@@ -77,6 +81,7 @@ class FusionDataLoader:
             "structured_ehr": struct_embeds,
             "discharge_notes": discharge_embeds,
             "radiology_notes": rad_embeds,
+            "clinical_events": clinical_events_embeds,
             "y": target,
             "splits": splits
         }
@@ -214,8 +219,11 @@ def main():
         f"Structured EHR ({emb_label})": ["demographics", "structured_ehr"],
         "Discharge Notes": ["demographics", "discharge_notes"],
         "Radiology Notes": ["demographics", "radiology_notes"],
+        "Clinical Events": ["demographics", "clinical_events"],
         "All Notes": ["demographics", "discharge_notes", "radiology_notes"],
-        f"Full Fusion ({emb_label})": ["demographics", "static_ehr", "structured_ehr", "discharge_notes", "radiology_notes"]
+        "All Text (Notes + Events)": ["demographics", "discharge_notes", "radiology_notes", "clinical_events"],
+        f"Full Fusion ({emb_label})": ["demographics", "static_ehr", "structured_ehr", "discharge_notes", "radiology_notes"],
+        f"Full Fusion + Events ({emb_label})": ["demographics", "static_ehr", "structured_ehr", "discharge_notes", "radiology_notes", "clinical_events"]
     }
     
     results = {}
