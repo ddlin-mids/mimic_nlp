@@ -1,0 +1,4 @@
+Job_ID,Task,Status,Duration,Key_Metric,Notes
+47008806,Unique Event Extraction,Completed,~1 min,"3,265,484 unique events","From 22.6M rows"
+47008924,Event Embedding,Completed,~17 min,"12,177 admissions embedded",Top-10K events; 78% cohort coverage
+47009630,Ablation Study,Running,TBD,Pending,10 experiments including new clinical_events modality

@@ -1,0 +1,68 @@
+{
+  "date": "2025-12-08",
+  "agents": ["Opencode Agent"],
+  "project": "MIMIC-IV Cardiorenal Readmission Prediction",
+  "starting_plan": [
+    "Review full project status and prep presentation",
+    "Draft comprehensive speaker notes",
+    "Analyze Fusion Paradox and design End-to-End Gated Fusion",
+    "Implement and train End-to-End Gated Fusion model",
+    "Update final report"
+  ],
+  "data": {
+    "sources": [
+      "data/interim/ehr_long_los/ehr_preprocessed_seq_by_day_cat_embedding.pkl",
+      "data/interim/embeddings/notes/*.npz",
+      "data/interim/readmit_analysis/long_los_cohort.csv"
+    ],
+    "rows_after_filters": 15659,
+    "transforms": [
+      "Dynamic loading of raw EHR sequences",
+      "Frozen ModernBERT embeddings (PCA 64-dim)"
+    ],
+    "quality": {
+      "missing_pct": null,
+      "label_balance": {"pos": 0.245, "neg": 0.755}
+    }
+  },
+  "experiments": [
+    {
+      "id": "e2e_gated",
+      "slice": "all",
+      "model": "End-to-End Gated Fusion",
+      "key_change": "Joint training of Transformer Encoder + Gated Fusion",
+      "metrics": {"test_auc": "TBD (Running)", "test_f1": "TBD (Running)"},
+      "notes": "Uses differential LR (2e-5 encoder, 1e-4 head) and gradient accumulation"
+    }
+  ],
+  "analysis": {
+    "top_features": [],
+    "sanity_checks": ["OOM mitigation via gradient accumulation (bs=16)"]
+  },
+  "artifacts": [
+    {"name": "src/models/pytorch/train_e2e_gated_fusion.py", "purpose": "Main training script"},
+    {"name": "documents/reports/final_project_report/speaker_notes.md", "purpose": "Presentation script"},
+    {"name": "final_project_report_v2.md", "purpose": "Updated final report"}
+  ],
+  "impact": {
+    "utility": "Potential to break 0.638 AUC ceiling by resolving frozen encoder bottleneck",
+    "robustness": "Preventing catastrophic forgetting with differential LR",
+    "decision_readiness": "Project is presentation-ready",
+    "risks": ["Training instability of E2E model"]
+  },
+  "deviations": [
+    "Increased memory requirement to 64GB due to OOM"
+  ],
+  "open_questions": [
+    {"question": "Will E2E training improve gate behavior?", "evidence_needed": "Gate value distribution analysis"}
+  ],
+  "next_steps": [
+    {"owner": "Opencode", "action": "Analyze E2E results", "success": "AUC > 0.641"},
+    {"owner": "Opencode", "action": "Run HPO if needed", "success": "Optimized hyperparameters"}
+  ],
+  "reproducibility": {
+    "entry_points": ["scripts/slurm/train_e2e_gated_fusion.sbatch"],
+    "config": {"lr": 1e-4, "encoder_lr": 2e-5, "hidden_dim": 128},
+    "lineage": "mimic_iv -> preprocess_ehr -> train_e2e_gated_fusion"
+  }
+}

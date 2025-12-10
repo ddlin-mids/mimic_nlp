@@ -1,0 +1,127 @@
+{
+  "date": "2025-12-08",
+  "agents": ["claude-opencode"],
+  "project": "MIMIC Readmission Prediction - Clinical Events Integration",
+  "starting_plan": [
+    "Integrate MIMIC-IV-Ext-22MCTS dataset as new text embedding modality",
+    "Fix GRU→Transformer naming in train_fusion_xgboost.py",
+    "Generate admission-level embeddings compatible with pipeline",
+    "Run ablation study with new modality tracked in MLflow"
+  ],
+  "data": {
+    "sources": [
+      "physionet.org/files/mimic-iv-ext-22mcts/1.0.0/clinical_event_timestamp.csv",
+      "data/interim/readmit_analysis/long_los_cohort.csv"
+    ],
+    "rows_after_filters": 12177,
+    "transforms": [
+      "Extracted 3,265,484 unique events from 22.6M rows",
+      "Top-10K frequency filtering (covers 57% of occurrences)",
+      "BioClinical ModernBERT embedding (768-dim)",
+      "Mean-pooling aggregation per admission"
+    ],
+    "quality": {
+      "missing_pct": 22.2,
+      "label_balance": {
+        "pos": null,
+        "neg": null
+      },
+      "cohort_coverage": "12177/15659 admissions (78%)"
+    }
+  },
+  "experiments": [
+    {
+      "id": "47009630",
+      "slice": "cardiorenal_long",
+      "model": "xgboost",
+      "key_change": "Added clinical_events modality + 3 new ablation experiments",
+      "metrics": {
+        "auroc": null,
+        "auprc": null
+      },
+      "notes": "Job submitted, results pending"
+    }
+  ],
+  "analysis": {
+    "top_features": [
+      "hypertension (456,862 occurrences)",
+      "hypotension (290,163)",
+      "abdominal pain (214,686)",
+      "fever (181,303)",
+      "chest pain (173,231)"
+    ],
+    "sanity_checks": [
+      "Embedding format matches discharge_summary.npz",
+      "Cohort filtering verified against long_los_cohort.csv"
+    ]
+  },
+  "artifacts": [
+    {"name": "clinical_events.npz", "purpose": "Admission-level embeddings (12,177 x 768)"},
+    {"name": "clinical_events_manifest.json", "purpose": "Embedding metadata"},
+    {"name": "unique_clinical_events.txt", "purpose": "3.2M unique event strings"},
+    {"name": "event_stats.csv", "purpose": "Event frequency statistics"},
+    {"name": "hadm_event_mapping.parquet", "purpose": "Full hadm_id to event mapping"},
+    {"name": "extract_unique_clinical_events.py", "purpose": "Event extraction script"},
+    {"name": "embed_clinical_events.py", "purpose": "Event embedding pipeline"},
+    {"name": "train_ablation_clinical_events.sbatch", "purpose": "Ablation SLURM job"}
+  ],
+  "impact": {
+    "utility": "New text modality from 22M clinical events; results pending",
+    "robustness": "78% cohort coverage; 22% missing will use zero vectors",
+    "decision_readiness": "Pipeline ready; awaiting ablation results",
+    "risks": [
+      "Event frequency bias (common symptoms dominate)",
+      "Mean-pooling loses temporal ordering"
+    ]
+  },
+  "deviations": [
+    "Top-10K filtering instead of all 3.2M unique events (compute constraints)",
+    "Dataset contains free-text fragments, not structured codes as assumed"
+  ],
+  "open_questions": [
+    {
+      "question": "Should top-K be increased to 50K or 100K for better coverage?",
+      "evidence_needed": "Run ablation with different K values"
+    },
+    {
+      "question": "Does mean-pooling lose important temporal information?",
+      "evidence_needed": "Compare mean-pool vs attention aggregation"
+    },
+    {
+      "question": "Are top events clinically meaningful?",
+      "evidence_needed": "Clinical review of top-100 events"
+    }
+  ],
+  "next_steps": [
+    {
+      "owner": "user",
+      "action": "Monitor ablation job 47009630",
+      "success": "All 10 experiments complete with valid MLflow metrics"
+    },
+    {
+      "owner": "agent",
+      "action": "Analyze clinical events ablation results",
+      "success": "Determine if clinical_events improves Full Fusion by >=0.01 AUC"
+    },
+    {
+      "owner": "agent",
+      "action": "Increase top-K if beneficial",
+      "success": "Coverage >=90% of cohort admissions"
+    }
+  ],
+  "reproducibility": {
+    "entry_points": [
+      "ehr/extract_unique_clinical_events.py",
+      "ehr/embed_clinical_events.py",
+      "src/models/train_fusion_xgboost.py"
+    ],
+    "config": {
+      "seed": 42,
+      "data_alias": "long_los_cohort",
+      "top_k": 10000,
+      "embedding_model": "thomas-sounack/bioclinical-modernbert-base",
+      "embedding_dim": 768
+    },
+    "lineage": "mimic-iv-ext-22mcts → extract_unique → top-10K filter → BioClinical ModernBERT → mean-pool per admission → ablation"
+  }
+}

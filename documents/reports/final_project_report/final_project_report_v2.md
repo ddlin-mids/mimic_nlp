@@ -234,7 +234,19 @@ However, the lower AUC suggests that while the GNN learns to calibrate its outpu
 **Future Work:**  
 The Transformer Encoder proved superior for feature extraction, but its full integration into the fusion pipeline via end-to-end training (jointly optimizing encoder and fusion head) remains a key area for future work. Additionally, incorporating temporal edges into the GNN (e.g., linking sequential admissions for the same patient) could combine the benefits of graph-based patient similarity with temporal awareness.
 
-### 5.4 Model Selection & Deployment Recommendations
+### 5.5 End-to-End Gated Fusion (Work in Progress)
+
+To address the limitations of the two-stage pipeline (frozen encoder + fusion), we implemented an **End-to-End Gated Fusion** model. This architecture jointly trains the Transformer Encoder and the Gated Fusion head, allowing the encoder to learn features specifically optimized for multimodal fusion rather than just standalone readmission prediction.
+
+**Architecture:**
+- **EHR Stream:** Trainable Transformer Encoder (initialized from best pre-trained weights)
+- **Text Stream:** Frozen ModernBERT embeddings projected to hidden dimension
+- **Fusion:** Gated Multimodal Unit (GMU) with adaptive weighting
+- **Optimization:** Differential learning rates (lower for pre-trained encoder) to prevent catastrophic forgetting
+
+*Preliminary training runs are currently in progress. We hypothesize this approach will bridge the gap between the Transformer's superior potential (0.658 val AUC) and the current fusion baseline (0.638 test AUC).*
+
+### 5.6 Model Selection & Deployment Recommendations
 
 Given the close clustering of top models around AUROC ≈ 0.63–0.64, we view **operating point, calibration, and complexity** as more important than squeezing out another 0.001 of AUC.
 

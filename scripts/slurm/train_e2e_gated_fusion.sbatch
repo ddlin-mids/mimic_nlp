@@ -2,7 +2,7 @@
 #SBATCH --job-name=e2e_gated
 #SBATCH --partition=free-gpu
 #SBATCH --gres=gpu:A30:1
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --time=4:00:00
 #SBATCH --output=logs/slurm/e2e_gated_%j.log
 
@@ -25,7 +25,8 @@ uv run python src/models/pytorch/train_e2e_gated_fusion.py \
     --hidden_dim 128 \
     --pca_components 64 \
     --warmup_epochs 3 \
-    --accumulation_steps 4 \
+    --batch_size 16 \
+    --accumulation_steps 8 \
     --save_dir data/interim/ehr_long_los/models_e2e
 
 echo "Training finished."
