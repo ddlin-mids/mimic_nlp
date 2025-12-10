@@ -1,0 +1,94 @@
+{
+  "date": "2025-12-09",
+  "agents": ["claude-code"],
+  "project": "mimic-nlp-readmission",
+  "starting_plan": [
+    "Identify low-hanging fruit from recent reports",
+    "Investigate MIMIC-IV-Ext-22MCTS integration",
+    "Determine qLoRA vs embedding approach",
+    "Create HPC pipeline scripts"
+  ],
+  "data": {
+    "sources": ["MIMIC-IV-Ext-22MCTS", "long_los_cohort.csv"],
+    "rows_after_filters": 12177,
+    "transforms": ["cohort_filter", "temporal_leakage_prevention", "top_10k_vocab", "mean_pool"],
+    "quality": {
+      "missing_pct": null,
+      "label_balance": {"pos": 0.245, "neg": 0.755}
+    }
+  },
+  "experiments": [
+    {
+      "id": "clinical_events_only",
+      "slice": "cardiorenal",
+      "model": "xgboost",
+      "key_change": "22MCTS embeddings only",
+      "metrics": {"auroc": 0.553, "auprc": 0.274, "f1": 0.406},
+      "notes": "Underperforms discharge notes"
+    },
+    {
+      "id": "full_fusion_events",
+      "slice": "cardiorenal",
+      "model": "xgboost",
+      "key_change": "Add 22MCTS to full fusion",
+      "metrics": {"auroc": 0.608, "f1": 0.394},
+      "notes": "No improvement over fusion without events"
+    }
+  ],
+  "analysis": {
+    "top_features": ["structured_ehr", "discharge_notes"],
+    "sanity_checks": ["temporal_leakage_prevented", "cohort_filter_applied"]
+  },
+  "artifacts": [
+    {"name": "clinical_events.npz", "purpose": "Admission-level embeddings (12177x768)"},
+    {"name": "clinical_events_vocab.csv", "purpose": "Top 2000 events with IDs"},
+    {"name": "extract_unique_clinical_events.py", "purpose": "Enhanced extraction script"}
+  ],
+  "impact": {
+    "utility": "No incremental value over existing modalities",
+    "robustness": "High noise from LLM extraction",
+    "decision_readiness": "Not recommended for production",
+    "risks": ["LLM hallucinations in event extraction"]
+  },
+  "deviations": [
+    "Discovered existing artifacts from Dec 8",
+    "Cancelled redundant extraction job",
+    "Shifted to analysis and documentation"
+  ],
+  "open_questions": [
+    {
+      "question": "Would temporal attention over events improve AUC?",
+      "evidence_needed": "Implement attention mechanism, compare to mean-pool"
+    },
+    {
+      "question": "Is top-10k vocabulary optimal?",
+      "evidence_needed": "Ablate at 5k, 20k, 50k sizes"
+    }
+  ],
+  "next_steps": [
+    {
+      "owner": "david",
+      "action": "Threshold optimization for all models",
+      "success": "F1 > 0.30 for XGBoost"
+    },
+    {
+      "owner": "david",
+      "action": "Ensemble GNN + XGBoost",
+      "success": "AUC > 0.65"
+    }
+  ],
+  "reproducibility": {
+    "entry_points": [
+      "ehr/extract_unique_clinical_events.py",
+      "ehr/embed_clinical_events.py",
+      "src/models/train_fusion_xgboost.py"
+    ],
+    "config": {
+      "seed": 42,
+      "data_alias": "long_los_cohort",
+      "top_k_events": 10000,
+      "embedding_dim": 768
+    },
+    "lineage": "22MCTS -> cohort_filter -> temporal_filter -> top_10k -> BioClinicalBERT -> mean_pool"
+  }
+}

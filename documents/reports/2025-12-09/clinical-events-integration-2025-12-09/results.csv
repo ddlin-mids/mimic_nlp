@@ -1,0 +1,8 @@
+Experiment,Data Slice,Model,Key Change,Test AUC,Test AUPRC,Test F1,Notes
+Structured EHR (Transformer),Cardiorenal,XGBoost,Baseline,0.623,,0.403,Best performer
+Full Fusion (Transformer),Cardiorenal,XGBoost,+Notes,0.609,,0.396,
+Full Fusion + Events,Cardiorenal,XGBoost,+22MCTS,0.608,,0.394,No improvement
+All Text (Notes + Events),Cardiorenal,XGBoost,Notes+Events only,0.607,,0.408,
+Discharge Notes,Cardiorenal,XGBoost,Notes only,0.607,,0.408,
+Clinical Events,Cardiorenal,XGBoost,22MCTS only,0.553,0.274,0.406,Underperforms
+Baseline (Demo),Cardiorenal,XGBoost,Demographics,0.530,,0.400,

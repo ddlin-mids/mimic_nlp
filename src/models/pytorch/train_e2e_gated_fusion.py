@@ -245,18 +245,21 @@ class E2EFusionDataset(Dataset):
         key = self.keys[idx]
         hid = int(key.split('_')[1])
         
-        # EHR Seq
+        # EHR Seq - handle object arrays by explicit cast to float32
         ehr_seq = self.ehr_feat_dict[key]
         if len(ehr_seq) > self.max_len:
             ehr_seq = ehr_seq[-self.max_len:]
+        # Convert to float32 numpy array first (handles object dtype arrays)
+        ehr_seq = np.asarray(ehr_seq, dtype=np.float32)
             
         # Text Emb
-        text_emb = self.text_embeddings_dict.get(hid, np.zeros(64)) # Fallback if missing? 
-        # Note: text_embeddings_dict should map hadm_id -> embedding
+        text_emb = self.text_embeddings_dict.get(hid, np.zeros(64, dtype=np.float32))
+        # Ensure float32
+        text_emb = np.asarray(text_emb, dtype=np.float32)
         
         label = self.labels_map[key]
         
-        return torch.tensor(ehr_seq, dtype=torch.float32), torch.tensor(text_emb, dtype=torch.float32), torch.tensor(label, dtype=torch.float32)
+        return torch.from_numpy(ehr_seq), torch.from_numpy(text_emb), torch.tensor(label, dtype=torch.float32)
 
 def collate_fn(batch):
     ehr_seqs, text_embs, labels = zip(*batch)

@@ -234,17 +234,63 @@ However, the lower AUC suggests that while the GNN learns to calibrate its outpu
 **Future Work:**  
 The Transformer Encoder proved superior for feature extraction, but its full integration into the fusion pipeline via end-to-end training (jointly optimizing encoder and fusion head) remains a key area for future work. Additionally, incorporating temporal edges into the GNN (e.g., linking sequential admissions for the same patient) could combine the benefits of graph-based patient similarity with temporal awareness.
 
-### 5.5 End-to-End Gated Fusion (Work in Progress)
+### 5.4 MIMIC-IV-Ext-22MCTS Clinical Events (Negative Finding)
+
+We integrated the **MIMIC-IV-Ext-22MCTS** dataset (Wang et al., 2025), which provides 22.6 million timestamped clinical events extracted from discharge summaries via NLP. Our goal was to determine whether these normalized event fragments could complement full-text embeddings.
+
+**Data Processing:**
+- Extracted **3.27 million unique event strings** from the 22M row dataset
+- Events ranged from clinical terms ("hypertension", "chest pain") to medication names and procedures
+- Embedded the **top 10,000 events** (by frequency, covering 57% of occurrences) using BioClinical-ModernBERT
+- Aggregated event embeddings per admission via mean-pooling → (12,177 admissions × 768 dims)
+- Cohort coverage: 78% of long-stay admissions had embeddable clinical events
+
+**Ablation Results:**
+
+| Modality | Test AUROC | Test AUPRC | Δ vs Baseline |
+|:---------|:-----------|:-----------|:--------------|
+| Baseline (Demographics) | 0.530 | 0.257 | — |
+| Clinical Events (22MCTS) | 0.553 | 0.274 | +0.023 |
+| Discharge Notes | 0.607 | 0.336 | +0.077 |
+| Full Fusion (Transformer) | 0.609 | 0.333 | +0.079 |
+| Full Fusion + Events | 0.608 | 0.336 | +0.078 |
+
+**Key Finding:**  
+Clinical events alone provide only a **modest +0.023 AUC lift** over baseline, underperforming both discharge notes (+0.077) and radiology reports. Adding clinical events to the full fusion model yields **no incremental improvement** (0.608 vs 0.609 AUC).
+
+**Why Clinical Events Underperform:**
+1. **Information redundancy**: The 22MCTS events are *extracted from* discharge summaries—they represent a lossy subset of the full clinical narrative already captured by note embeddings.
+2. **Loss of context**: Short event strings ("hypertension", "fever") lack the clinical reasoning present in full sentences.
+3. **Mean-pooling limitations**: Averaging embeddings of 50-200+ events per admission dilutes discriminative signals.
+
+This represents an important **negative result**: structured extractions from text do not substitute for, nor meaningfully augment, full-document embeddings in our pipeline.
+
+### 5.5 End-to-End Gated Fusion
 
 To address the limitations of the two-stage pipeline (frozen encoder + fusion), we implemented an **End-to-End Gated Fusion** model. This architecture jointly trains the Transformer Encoder and the Gated Fusion head, allowing the encoder to learn features specifically optimized for multimodal fusion rather than just standalone readmission prediction.
 
 **Architecture:**
 - **EHR Stream:** Trainable Transformer Encoder (initialized from best pre-trained weights)
-- **Text Stream:** Frozen ModernBERT embeddings projected to hidden dimension
+- **Text Stream:** Frozen ModernBERT embeddings projected to hidden dimension via MLP
 - **Fusion:** Gated Multimodal Unit (GMU) with adaptive weighting
-- **Optimization:** Differential learning rates (lower for pre-trained encoder) to prevent catastrophic forgetting
+- **Optimization:** Differential learning rates (2e-5 for encoder, 1e-4 for fusion heads) to prevent catastrophic forgetting
 
-*Preliminary training runs are currently in progress. We hypothesize this approach will bridge the gap between the Transformer's superior potential (0.658 val AUC) and the current fusion baseline (0.638 test AUC).*
+**Results:**
+
+| Metric | Value |
+|:-------|:------|
+| Test AUROC | **0.625** |
+| Test AUPRC | 0.353 |
+| Test F1 | **0.410** |
+| Test Recall | 0.753 |
+| Test Precision | 0.282 |
+| Mean Gate Value | 0.48 |
+
+**Key Finding:** While the E2E model slightly underperforms the two-stage GRU+XGBoost baseline on AUC (0.625 vs 0.641), it achieves the **highest F1 score (0.41)** among all neural models—exceeding even the GNN (0.406). The balanced gate value (~0.48) suggests the model learns to equally weight EHR and text streams, rather than collapsing to one modality.
+
+**Implications:** The E2E approach trades ~0.016 AUC for a substantial F1 improvement (+0.12 over GRU Gated Fusion). This makes it particularly attractive for **clinical alerting applications** where flagging true positives is more valuable than perfectly ranking all patients. The high recall (75%) means 3 out of 4 readmissions are correctly identified.
+
+**Ongoing Work:** We are currently running intensive HPO (50 Optuna trials) on the E2E architecture, searching over hidden dimensions (64-256), dropout (0.1-0.5), learning rates, transformer depth (1-3 layers), and PCA components (32-128). Preliminary results from HPO will be incorporated into the final model comparison.
 
 ### 5.6 Model Selection & Deployment Recommendations
 

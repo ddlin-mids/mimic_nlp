@@ -31,10 +31,23 @@ cd "$SLURM_SUBMIT_DIR"
 # Ensure log directory exists
 mkdir -p logs/slurm
 
-# Run extraction with mapping save (for later reconstruction)
+# Configuration
+COHORT_PATH="data/interim/readmit_analysis/long_los_cohort.csv"
+OUTPUT_DIR="data/interim/clinical_events"
+
+# Run extraction with cohort filtering and daily sequences
+# This generates:
+#   - unique_clinical_events.txt (all unique events)
+#   - event_stats.csv (frequency stats)
+#   - clinical_events_filtered.csv (events for cohort only)
+#   - clinical_events_vocab.csv (vocabulary with IDs)
+#   - clinical_events_daily.pkl (daily sequences per admission)
 uv run python ehr/extract_unique_clinical_events.py \
     --input physionet.org/files/mimic-iv-ext-22mcts/1.0.0/clinical_event_timestamp.csv \
-    --output_dir data/interim/mimic_22m \
+    --cohort-path "$COHORT_PATH" \
+    --output_dir "$OUTPUT_DIR" \
+    --min-freq 10 \
+    --max-vocab-size 2000 \
     --save_mapping
 
 echo ""

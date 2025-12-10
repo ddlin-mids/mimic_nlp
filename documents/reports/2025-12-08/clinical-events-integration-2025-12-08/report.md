@@ -101,16 +101,32 @@
 |--------|------|--------|
 | 47008806 | Unique event extraction | Completed |
 | 47008924 | Event embedding | Completed |
-| 47009630 | Ablation study | Submitted (pending results) |
+| 47009630 | Ablation study | **Completed** |
+
+### Ablation Results (Test Set)
+
+| Experiment | Test AUC | Test AUPRC | Test F1 | Delta vs Baseline |
+|------------|----------|------------|---------|-------------------|
+| Baseline (Demo) | 0.5297 | 0.2574 | 0.4000 | - |
+| Static EHR | 0.6018 | 0.3004 | 0.3917 | +0.0721 |
+| **Structured EHR (Transformer)** | **0.6227** | **0.3534** | 0.4031 | **+0.0930** |
+| Discharge Notes | 0.6067 | 0.3362 | 0.4083 | +0.0770 |
+| Radiology Notes | 0.5984 | 0.3111 | 0.4090 | +0.0687 |
+| **Clinical Events (NEW)** | 0.5525 | 0.2740 | 0.4060 | +0.0228 |
+| All Notes | 0.6015 | 0.3141 | 0.4085 | +0.0718 |
+| All Text (Notes + Events) | 0.6068 | 0.3398 | 0.4076 | +0.0771 |
+| Full Fusion (Transformer) | 0.6085 | 0.3329 | 0.3957 | +0.0788 |
+| Full Fusion + Events (Transformer) | 0.6082 | 0.3363 | 0.3937 | +0.0785 |
 
 ---
 
 ## Impact Assessment
 
 ### Accuracy / Utility
-- Added a new text modality derived from 22M clinical event timestamps
-- Enables testing whether temporal event descriptions improve readmission prediction
-- Results pending from ablation job 47009630
+- **Structured EHR (Transformer) is the best single modality** - AUC 0.6227, AUPRC 0.3534
+- **Clinical Events alone provides modest lift** - AUC 0.5525 (+0.0228 vs baseline)
+- **Adding Clinical Events to Full Fusion does not improve performance** - 0.6082 vs 0.6085
+- **Best AUPRC comes from All Text (Notes + Events)** - 0.3398
 
 ### Reliability / Robustness
 - 78% cohort coverage (12,177/15,659 admissions)
@@ -228,4 +244,17 @@ physionet.org/files/mimic-iv-ext-22mcts/1.0.0/clinical_event_timestamp.csv
 |--------|--------|----------|--------|
 | 47008806 | extract_unique_events.sbatch | ~1 min | Completed |
 | 47008924 | embed_clinical_events.sbatch | ~17 min | Completed |
-| 47009630 | train_ablation_clinical_events.sbatch | TBD | Running |
+| 47009630 | train_ablation_clinical_events.sbatch | ~10 min | **Completed** |
+
+---
+
+## Conclusion
+
+**This experiment represents a well-documented negative finding.** The MIMIC-IV-Ext-22MCTS clinical events dataset, despite providing 22.6 million timestamped events, does not improve our multimodal readmission prediction model when added to full-document text embeddings.
+
+**Key takeaways:**
+1. **Structured extractions are redundant** when the source documents are already embedded
+2. **Mean-pooling aggregation loses discriminative signal** across 50-200+ events per admission
+3. **The Structured EHR Transformer (0.623 AUC) remains the best single modality**, outperforming all text-based approaches
+
+**Recommendation:** Do not include clinical_events in the final production model. Focus optimization efforts on End-to-End Gated Fusion, which addresses the Transformer-to-fusion integration gap.
