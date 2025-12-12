@@ -31,10 +31,10 @@ echo "===================================================================="
 
 cd "$SLURM_SUBMIT_DIR"
 
-echo ">>> Starting HPO Sweep with Transformer embeddings..."
+echo ">>> Starting HPO Sweep with Transformer embeddings (50 trials)..."
 uv run python src/models/pytorch/train_gated_fusion_hpo.py \
-    --trials 30 \
-    --pca 64 \
+    --trials 50 \
+    --pca 128 \
     --embedding_dir "data/interim/ehr_long_los/embeddings_transformer"
 
 echo "===================================================================="

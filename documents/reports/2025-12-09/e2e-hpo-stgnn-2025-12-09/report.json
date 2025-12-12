@@ -1,0 +1,94 @@
+{
+  "date": "2025-12-09",
+  "agents": ["claude-code"],
+  "project": "MIMIC-IV 30-Day Readmission Prediction",
+  "subtask": "E2E Gated Fusion HPO & STGNN Infrastructure",
+  "starting_plan": [
+    "Monitor STGNN job (47018768)",
+    "Prepare intensive HPO for best-performing models",
+    "Pick best model and HPO to the max",
+    "Evaluate STGNN results when complete"
+  ],
+  "data": {
+    "sources": [
+      "data/interim/ehr_long_los/ehr_preprocessed_seq_by_day_cat_embedding.pkl (7.3GB)",
+      "data/interim/readmit_analysis/long_los_cohort.csv (15,659 admissions)",
+      "data/interim/embeddings/notes/*.npz (~300MB)"
+    ],
+    "rows_after_filters": 15659,
+    "transforms": ["PCA on text embeddings (768->32/64/128 in HPO)"],
+    "quality": {
+      "missing_pct": null,
+      "label_balance": {"pos": 0.245, "neg": 0.755}
+    }
+  },
+  "experiments": [
+    {
+      "id": "e2e_gated_baseline",
+      "slice": "test",
+      "model": "EndToEndGatedFusion",
+      "key_change": "baseline (previous session)",
+      "metrics": {"auroc": 0.6246, "auprc": 0.3527, "f1": 0.4104, "recall": 0.753},
+      "notes": "Best F1 among neural models"
+    },
+    {
+      "id": "hpo_job_47019078",
+      "slice": "val",
+      "model": "EndToEndGatedFusion+Optuna",
+      "key_change": "50 trials, 10-dim search space",
+      "metrics": {"auroc": null, "auprc": null},
+      "notes": "In progress (~12 hours)"
+    }
+  ],
+  "analysis": {
+    "top_features": null,
+    "sanity_checks": ["data_loading_verified", "mlflow_tracking_enabled"],
+    "key_insight": "E2E trades -0.016 AUC for +0.12 F1 vs GRU Gated Fusion"
+  },
+  "artifacts": [
+    {"name": "src/models/pytorch/train_e2e_gated_fusion_hpo.py", "purpose": "Enhanced HPO script with 10-dim search"},
+    {"name": "scripts/slurm/train_e2e_gated_fusion_hpo.sbatch", "purpose": "12-hour HPO SLURM job"},
+    {"name": "final_project_report_v2.md (Section 5.5)", "purpose": "Updated with E2E results"}
+  ],
+  "impact": {
+    "utility": "HPO expected to improve E2E AUC from 0.625 to ~0.64+",
+    "robustness": "50 Optuna trials with TPE sampler + median pruner",
+    "decision_readiness": "Pending HPO results (~12 hours)",
+    "risks": ["HPC I/O bottleneck delayed STGNN", "pickle loading slow on shared filesystem"]
+  },
+  "deviations": [
+    "STGNN evaluation delayed - job stuck loading 7.3GB pickle for 50+ minutes",
+    "Comprehensive HPO rewrite instead of quick setup - original script too basic"
+  ],
+  "open_questions": [
+    {"question": "Will STGNN job complete?", "evidence_needed": "Wait for pickle load or cancel/resubmit"},
+    {"question": "Can HPO push E2E AUC above 0.64?", "evidence_needed": "HPO trial results in ~12 hours"},
+    {"question": "Is pickle the right format for 7GB+ data?", "evidence_needed": "Benchmark zarr/HDF5 vs pickle"}
+  ],
+  "next_steps": [
+    {"owner": "agent", "action": "Monitor HPO job 47019078", "success": "50 trials complete, best_val_auc logged"},
+    {"owner": "agent", "action": "Decide on STGNN job", "success": "Results or root cause identified"},
+    {"owner": "agent", "action": "Evaluate HPO results", "success": "Test AUC >= 0.63, F1 >= 0.40"},
+    {"owner": "agent", "action": "Update final report", "success": "Report reflects best model configuration"}
+  ],
+  "reproducibility": {
+    "entry_points": [
+      "scripts/slurm/train_e2e_gated_fusion_hpo.sbatch",
+      "src/models/pytorch/train_e2e_gated_fusion_hpo.py"
+    ],
+    "config": {
+      "seed": 42,
+      "n_trials": 50,
+      "epochs_per_trial": 15,
+      "final_epochs": 50,
+      "data_alias": "ehr_long_los"
+    },
+    "lineage": "MIMIC-IV -> get_mimic_cohort.py -> preprocess_ehr.py -> embed_notes_bioclinical_mbert.py -> interim artifacts"
+  },
+  "jobs": {
+    "running": [
+      {"id": "47019078", "name": "e2e_hpo", "status": "running", "time_elapsed": "~3 min"},
+      {"id": "47018768", "name": "stgnn", "status": "stuck_loading", "time_elapsed": "~50 min"}
+    ]
+  }
+}

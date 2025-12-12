@@ -190,14 +190,14 @@ def evaluate(model, loader, criterion, device):
     return auc, auprc, f1
 
 def objective(trial, ehr_data, txt_data, y, splits, pca_components=64, device="cuda"):
-    # Hyperparameters
+    # Hyperparameters - expanded search space
     params = {
-        "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
-        "dropout": trial.suggest_float("dropout", 0.1, 0.5),
-        "hidden_dim": trial.suggest_categorical("hidden_dim", [32, 64, 128, 256]),
-        "weight_decay": trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True),
-        "batch_size": 64,
-        "epochs": 25 # Reduced for HPO speed
+        "lr": trial.suggest_float("lr", 1e-5, 5e-3, log=True),
+        "dropout": trial.suggest_float("dropout", 0.1, 0.6),
+        "hidden_dim": trial.suggest_categorical("hidden_dim", [64, 128, 256, 512]),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-1, log=True),
+        "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128]),
+        "epochs": 30  # Slightly longer for better convergence
     }
     
     # PCA inside objective (or cached outside)

@@ -31,24 +31,26 @@ echo "===================================================================="
 
 cd "$SLURM_SUBMIT_DIR"
 
-GRAPH_PATH="data/interim/ehr_long_los/graph_multimodal/graph_pyg.pt"
+# Use the main graph (will be re-indexed to valid nodes automatically)
+GRAPH_PATH="data/interim/ehr_long_los/graph/graph_pyg.pt"
 COHORT="data/interim/readmit_analysis/long_los_cohort.csv"
 SAVE_DIR="data/interim/ehr_long_los/models_gnn_hpo"
 
 # Verify graph exists
 if [ ! -f "$GRAPH_PATH" ]; then
     echo "Error: Graph file not found at $GRAPH_PATH"
-    echo "Please run scripts/slurm/preprocess_graph_multimodal.sbatch first."
     exit 1
 fi
 
-echo ">>> Starting GNN HPO Sweep..."
+mkdir -p "$SAVE_DIR"
+
+echo ">>> Starting GNN HPO Sweep (50 trials)..."
 uv run python src/models/pytorch/train_gnn_hpo.py \
     --graph_path "$GRAPH_PATH" \
     --cohort_path "$COHORT" \
     --save_dir "$SAVE_DIR" \
     --epochs 100 \
-    --n_trials 30
+    --n_trials 50
 
 echo "===================================================================="
 echo "Job Completed: $(date)"

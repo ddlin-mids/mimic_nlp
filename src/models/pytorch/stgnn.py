@@ -6,6 +6,7 @@ at each timestep, allowing the model to learn from similar patients'
 trajectories during temporal encoding.
 
 Uses PyTorch Geometric (PyG) for graph operations.
+Supports gradient checkpointing for memory efficiency.
 
 Reference: Almeida et al. (2025) - Multimodal spatiotemporal graph neural 
 networks for improved prediction of 30-day all-cause hospital readmission.
@@ -14,6 +15,7 @@ networks for improved prediction of 30-day all-cause hospital readmission.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from torch_geometric.nn import SAGEConv, GATConv, GCNConv
 from torch_geometric.data import Data
 import numpy as np
@@ -115,6 +117,8 @@ class GConvGRU(nn.Module):
     
     Processes temporal sequences while aggregating information from
     similar patients at each timestep via graph convolution.
+    
+    Supports gradient checkpointing for memory efficiency.
     """
     
     def __init__(
@@ -124,11 +128,13 @@ class GConvGRU(nn.Module):
         num_layers: int = 1,
         conv_type: str = 'sage',
         dropout: float = 0.1,
+        use_checkpointing: bool = False,
     ):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.use_checkpointing = use_checkpointing
         
         # Stack of GConvGRU cells
         self.layers = nn.ModuleList()
@@ -144,6 +150,10 @@ class GConvGRU(nn.Module):
             )
         
         self.dropout = nn.Dropout(dropout)
+    
+    def _forward_cell(self, layer, x_t, h, edge_index, edge_weight):
+        """Wrapper for checkpointing - forward through a single cell."""
+        return layer(x_t, h, edge_index, edge_weight)
         
     def forward(self, x_seq, edge_index, edge_weight=None, lengths=None):
         """
@@ -171,7 +181,20 @@ class GConvGRU(nn.Module):
             
             outputs = []
             for t in range(seq_len):
-                h = layer(curr_input[t], h, edge_index, edge_weight)
+                if self.use_checkpointing and self.training:
+                    # Use gradient checkpointing to save memory during training
+                    # Note: checkpoint requires all inputs to require grad or be non-tensor
+                    h = checkpoint(
+                        self._forward_cell,
+                        layer,
+                        curr_input[t],
+                        h,
+                        edge_index,
+                        edge_weight,
+                        use_reentrant=False
+                    )
+                else:
+                    h = layer(curr_input[t], h, edge_index, edge_weight)
                 outputs.append(h)
             
             # Stack outputs for next layer
@@ -204,6 +227,8 @@ class STGNN(nn.Module):
     2. GConvGRU: Process temporal EHR sequences with graph convolution
     3. Optional: Text embedding fusion
     4. Classification head
+    
+    Supports gradient checkpointing for memory efficiency.
     """
     
     def __init__(
@@ -221,6 +246,8 @@ class STGNN(nn.Module):
         # Text fusion params
         text_dim: int = None,
         fusion_type: str = 'concat',  # 'concat', 'gated', 'attention'
+        # Memory optimization
+        use_checkpointing: bool = False,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -229,8 +256,8 @@ class STGNN(nn.Module):
         self.ehr_input_dim = ehr_input_dim
         
         # Categorical embedding (optional)
-        self.cat_idxs = cat_idxs or []
-        self.cat_dims = cat_dims or []
+        self.cat_idxs = cat_idxs if cat_idxs is not None else []
+        self.cat_dims = cat_dims if cat_dims is not None else []
         self.cat_emb_dim = cat_emb_dim
         
         actual_input_dim = ehr_input_dim
@@ -250,6 +277,7 @@ class STGNN(nn.Module):
             num_layers=num_gru_layers,
             conv_type=conv_type,
             dropout=dropout,
+            use_checkpointing=use_checkpointing,
         )
         
         # Text fusion (optional)
@@ -371,6 +399,7 @@ class STGNNMultimodal(nn.Module):
         cat_idxs: list = None,
         cat_dims: list = None,
         cat_emb_dim: int = 4,
+        use_checkpointing: bool = False,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -383,10 +412,11 @@ class STGNNMultimodal(nn.Module):
             num_classes=1,  # We'll use our own classifier
             conv_type=conv_type,
             dropout=dropout,
-            cat_idxs=cat_idxs,
-            cat_dims=cat_dims,
+            cat_idxs=cat_idxs if cat_idxs is not None else [],
+            cat_dims=cat_dims if cat_dims is not None else [],
             cat_emb_dim=cat_emb_dim,
             text_dim=None,  # No fusion in encoder
+            use_checkpointing=use_checkpointing,
         )
         
         # Text stream (simple projection)
