@@ -45,6 +45,7 @@ class FusionDataLoader:
         self.discharge_path = self.base_dir / "data/interim/embeddings/notes/discharge_summary.npz"
         self.radiology_path = self.base_dir / "data/interim/embeddings/notes/radiology_report.npz"
         self.clinical_events_path = self.base_dir / "data/interim/embeddings/notes/clinical_events.npz"
+        self.lab_features_path = self.base_dir / "data/interim/ehr_long_los/lab_features/lab_features.npz"
 
     def load_data_dict(self):
         """Returns a dictionary of features by modality"""
@@ -74,6 +75,9 @@ class FusionDataLoader:
         
         # 6. Clinical Events (from MIMIC-IV-Ext-22MCTS)
         clinical_events_embeds = self._load_aligned_embeddings(self.clinical_events_path, hadm_ids)
+        
+        # 7. Lab Trajectory Features
+        lab_features = self._load_lab_features(hadm_ids)
 
         return {
             "demographics": demo_features,
@@ -82,6 +86,7 @@ class FusionDataLoader:
             "discharge_notes": discharge_embeds,
             "radiology_notes": rad_embeds,
             "clinical_events": clinical_events_embeds,
+            "lab_features": lab_features,
             "y": target,
             "splits": splits
         }
@@ -139,6 +144,30 @@ class FusionDataLoader:
         dim = embeddings.shape[1]
         aligned = [embeddings[hid_to_idx[tid]] if tid in hid_to_idx else np.zeros(dim) 
                    for tid in target_ids]
+        return np.array(aligned)
+
+    def _load_lab_features(self, target_ids):
+        """Load lab trajectory features aligned to cohort."""
+        if not self.lab_features_path.exists():
+            logger.warning(f"Lab features not found at {self.lab_features_path}")
+            return np.zeros((len(target_ids), 0))
+        
+        data = np.load(self.lab_features_path)
+        source_ids = data['hadm_ids']
+        source_embeds = data['embeddings']
+        
+        # Create mapping
+        id_map = {int(hid): idx for idx, hid in enumerate(source_ids)}
+        
+        dim = source_embeds.shape[1]
+        aligned = []
+        for tid in target_ids:
+            if tid in id_map:
+                aligned.append(source_embeds[id_map[tid]])
+            else:
+                aligned.append(np.zeros(dim))
+        
+        logger.info(f"Loaded lab features: {dim} features")
         return np.array(aligned)
 
 def train_and_evaluate(X_train, y_train, X_val, y_val, X_test, y_test, params, run_name, embedding_type):
@@ -220,10 +249,14 @@ def main():
         "Discharge Notes": ["demographics", "discharge_notes"],
         "Radiology Notes": ["demographics", "radiology_notes"],
         "Clinical Events": ["demographics", "clinical_events"],
+        "Lab Features Only": ["demographics", "lab_features"],
         "All Notes": ["demographics", "discharge_notes", "radiology_notes"],
         "All Text (Notes + Events)": ["demographics", "discharge_notes", "radiology_notes", "clinical_events"],
+        f"Structured EHR + Labs ({emb_label})": ["demographics", "structured_ehr", "lab_features"],
         f"Full Fusion ({emb_label})": ["demographics", "static_ehr", "structured_ehr", "discharge_notes", "radiology_notes"],
-        f"Full Fusion + Events ({emb_label})": ["demographics", "static_ehr", "structured_ehr", "discharge_notes", "radiology_notes", "clinical_events"]
+        f"Full Fusion + Labs ({emb_label})": ["demographics", "static_ehr", "structured_ehr", "discharge_notes", "radiology_notes", "lab_features"],
+        f"Full Fusion + Events ({emb_label})": ["demographics", "static_ehr", "structured_ehr", "discharge_notes", "radiology_notes", "clinical_events"],
+        f"Full Fusion + Labs + Events ({emb_label})": ["demographics", "static_ehr", "structured_ehr", "discharge_notes", "radiology_notes", "lab_features", "clinical_events"]
     }
     
     results = {}
