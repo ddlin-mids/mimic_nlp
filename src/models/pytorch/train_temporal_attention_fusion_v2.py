@@ -331,9 +331,10 @@ class TemporalAttentionFusionV2(nn.Module):
         """Forward pass with batch dict containing all inputs."""
         outputs: dict[str, Any] = {'attn_weights': {}}
         
-        # Get device from any tensor in batch
-        device = next(iter(batch.values())).device
-        batch_size = next(iter(batch.values())).shape[0]
+        # Get device from any tensor in batch (skip non-tensor values like hadm_id list)
+        tensor_vals = [v for v in batch.values() if isinstance(v, torch.Tensor)]
+        device = tensor_vals[0].device
+        batch_size = tensor_vals[0].shape[0]
         
         modality_embeddings = []
         

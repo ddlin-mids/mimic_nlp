@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --mem=96G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/prep_temporal_%j.out
 #SBATCH --error=logs/prep_temporal_%j.err
