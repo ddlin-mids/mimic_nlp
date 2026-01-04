@@ -8,7 +8,7 @@ trajectories during temporal encoding.
 Uses PyTorch Geometric (PyG) for graph operations.
 Supports gradient checkpointing for memory efficiency.
 
-Reference: Almeida et al. (2025) - Multimodal spatiotemporal graph neural 
+Reference: Tang et al. (2022) - Multimodal spatiotemporal graph neural 
 networks for improved prediction of 30-day all-cause hospital readmission.
 """
 
@@ -16,12 +16,100 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from torch_geometric.nn import SAGEConv, GATConv, GCNConv
+from torch_geometric.nn import SAGEConv, GATConv, GCNConv, MessagePassing
 from torch_geometric.data import Data
+from torch_geometric.utils import add_self_loops, degree
 import numpy as np
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class WeightedSAGEConv(MessagePassing):
+    """
+    GraphSAGE convolution with edge weight support.
+    
+    Matches reference implementation in refs/readmit-stgnn/model/graphsage.py
+    
+    Standard GraphSAGE aggregation:
+        h_N(i) = mean({h_j for j in N(i)})
+        h_i' = W * concat(h_i, h_N(i))
+    
+    With edge weights (what reference uses):
+        h_N(i) = mean({e_ji * h_j for j in N(i)})
+        h_i' = W * concat(h_i, h_N(i))
+    
+    where e_ji is the edge weight (similarity) from node j to node i.
+    """
+    
+    def __init__(self, in_channels: int, out_channels: int, bias: bool = True):
+        super().__init__(aggr='mean')  # Mean aggregation like reference
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        
+        # fc_self and fc_neigh like reference (graphsage.py lines 124-126)
+        self.fc_self = nn.Linear(in_channels, out_channels, bias=False)
+        self.fc_neigh = nn.Linear(in_channels, out_channels, bias=False)
+        
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(out_channels))
+        else:
+            self.register_parameter('bias', None)
+        
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        # Xavier initialization like reference (graphsage.py lines 145-152)
+        gain = nn.init.calculate_gain('relu')
+        nn.init.xavier_uniform_(self.fc_self.weight, gain=gain)
+        nn.init.xavier_uniform_(self.fc_neigh.weight, gain=gain)
+        if self.bias is not None:
+            nn.init.zeros_(self.bias)
+    
+    def forward(self, x, edge_index, edge_weight=None):
+        """
+        Args:
+            x: Node features, shape (num_nodes, in_channels)
+            edge_index: Graph connectivity, shape (2, num_edges)
+            edge_weight: Edge weights (similarity), shape (num_edges,)
+            
+        Returns:
+            out: Updated node features, shape (num_nodes, out_channels)
+        """
+        # Store edge_weight for use in message function
+        self._edge_weight = edge_weight
+        
+        # Propagate neighbor features (weighted by edge_weight if provided)
+        h_neigh = self.propagate(edge_index, x=x, size=None)
+        
+        # Combine self and neighbor (like reference graphsage.py line 270)
+        # rst = self.fc_self(h_self) + h_neigh (where h_neigh already transformed)
+        out = self.fc_self(x) + self.fc_neigh(h_neigh)
+        
+        if self.bias is not None:
+            out = out + self.bias
+        
+        return out
+    
+    def message(self, x_j):
+        """
+        Compute messages from neighbors.
+        
+        Args:
+            x_j: Neighbor features, shape (num_edges, in_channels)
+            
+        Returns:
+            Messages scaled by edge weight if provided.
+        """
+        # Reference (graphsage.py lines 217-220):
+        # msg_fn = fn.u_mul_e('h', '_edge_weight', 'm')
+        # This multiplies source features by edge weight
+        if self._edge_weight is not None:
+            return self._edge_weight.view(-1, 1) * x_j
+        return x_j
+    
+    def __repr__(self):
+        return f'{self.__class__.__name__}({self.in_channels}, {self.out_channels})'
 
 
 class GConvGRUCell(nn.Module):
@@ -35,13 +123,19 @@ class GConvGRUCell(nn.Module):
     4. Output new hidden state h_t
     
     This allows temporal modeling that also considers similar patients.
+    
+    Supports multiple convolution types:
+    - 'weighted_sage': Custom WeightedSAGEConv with edge weight support (matches reference)
+    - 'sage': PyG SAGEConv (no edge weight support)
+    - 'gcn': GCNConv with edge weight support
+    - 'gat': GATConv with edge weight support
     """
     
     def __init__(
         self,
         input_dim: int,
         hidden_dim: int,
-        conv_type: str = 'sage',  # 'sage', 'gat', 'gcn'
+        conv_type: str = 'weighted_sage',  # 'weighted_sage', 'sage', 'gat', 'gcn'
         dropout: float = 0.1,
     ):
         super().__init__()
@@ -52,7 +146,12 @@ class GConvGRUCell(nn.Module):
         combined_dim = input_dim + hidden_dim
         
         # Graph convolution for gates (reset + update = 2 * hidden_dim)
-        if conv_type == 'sage':
+        if conv_type == 'weighted_sage':
+            # Custom WeightedSAGEConv that supports edge weights (matches reference)
+            self.conv_gates = WeightedSAGEConv(combined_dim, hidden_dim * 2)
+            self.conv_candidate = WeightedSAGEConv(combined_dim, hidden_dim)
+        elif conv_type == 'sage':
+            # Standard PyG SAGEConv (no edge weight support)
             self.conv_gates = SAGEConv(combined_dim, hidden_dim * 2)
             self.conv_candidate = SAGEConv(combined_dim, hidden_dim)
         elif conv_type == 'gat':
@@ -62,7 +161,7 @@ class GConvGRUCell(nn.Module):
             self.conv_gates = GCNConv(combined_dim, hidden_dim * 2)
             self.conv_candidate = GCNConv(combined_dim, hidden_dim)
         
-        # Bias terms
+        # Bias terms (like reference model.py lines 160-164)
         self.gate_bias = nn.Parameter(torch.zeros(hidden_dim * 2))
         self.candidate_bias = nn.Parameter(torch.zeros(hidden_dim))
         
@@ -80,32 +179,42 @@ class GConvGRUCell(nn.Module):
             h_new: Updated hidden state, shape (num_nodes, hidden_dim)
         """
         # Concatenate input and previous hidden state
+        # Reference (model.py lines 180-182)
         combined = torch.cat([x_t, h_prev], dim=-1)  # (num_nodes, input_dim + hidden_dim)
         
         # Compute gates via graph convolution
+        # Reference (model.py line 183): h = self.gconv_gate(graph, inputs_state)
         if self.conv_type == 'sage':
+            # Standard SAGEConv doesn't support edge weights
             gates = self.conv_gates(combined, edge_index)
+        elif self.conv_type == 'weighted_sage':
+            # Our custom WeightedSAGEConv supports edge weights
+            gates = self.conv_gates(combined, edge_index, edge_weight)
         else:
+            # GCN and GAT support edge weights
             gates = self.conv_gates(combined, edge_index, edge_weight)
         
+        # Add bias and apply sigmoid (reference model.py lines 184-186)
         gates = gates + self.gate_bias
         gates = torch.sigmoid(gates)
         
-        # Split into reset and update gates
+        # Split into reset and update gates (reference model.py line 189)
         r, u = torch.split(gates, self.hidden_dim, dim=-1)
         
-        # Compute candidate hidden state
+        # Compute candidate hidden state (reference model.py lines 191-197)
         combined_reset = torch.cat([x_t, r * h_prev], dim=-1)
         
         if self.conv_type == 'sage':
             c = self.conv_candidate(combined_reset, edge_index)
+        elif self.conv_type == 'weighted_sage':
+            c = self.conv_candidate(combined_reset, edge_index, edge_weight)
         else:
             c = self.conv_candidate(combined_reset, edge_index, edge_weight)
         
         c = c + self.candidate_bias
         c = torch.tanh(c)
         
-        # Update hidden state
+        # Update hidden state (reference model.py line 199)
         h_new = u * h_prev + (1 - u) * c
         
         return h_new
@@ -126,7 +235,7 @@ class GConvGRU(nn.Module):
         input_dim: int,
         hidden_dim: int,
         num_layers: int = 1,
-        conv_type: str = 'sage',
+        conv_type: str = 'weighted_sage',
         dropout: float = 0.1,
         use_checkpointing: bool = False,
     ):
@@ -237,14 +346,14 @@ class STGNN(nn.Module):
         hidden_dim: int = 128,
         num_gru_layers: int = 1,
         num_classes: int = 1,
-        conv_type: str = 'sage',
+        conv_type: str = 'weighted_sage',
         dropout: float = 0.2,
         # Categorical embedding params
-        cat_idxs: list = None,
-        cat_dims: list = None,
+        cat_idxs: list | None = None,
+        cat_dims: list | None = None,
         cat_emb_dim: int = 4,
         # Text fusion params
-        text_dim: int = None,
+        text_dim: int | None = None,
         fusion_type: str = 'concat',  # 'concat', 'gated', 'attention'
         # Memory optimization
         use_checkpointing: bool = False,
@@ -394,10 +503,10 @@ class STGNNMultimodal(nn.Module):
         hidden_dim: int = 128,
         num_gru_layers: int = 1,
         num_classes: int = 1,
-        conv_type: str = 'sage',
+        conv_type: str = 'weighted_sage',
         dropout: float = 0.2,
-        cat_idxs: list = None,
-        cat_dims: list = None,
+        cat_idxs: list | None = None,
+        cat_dims: list | None = None,
         cat_emb_dim: int = 4,
         use_checkpointing: bool = False,
     ):
@@ -412,8 +521,8 @@ class STGNNMultimodal(nn.Module):
             num_classes=1,  # We'll use our own classifier
             conv_type=conv_type,
             dropout=dropout,
-            cat_idxs=cat_idxs if cat_idxs is not None else [],
-            cat_dims=cat_dims if cat_dims is not None else [],
+            cat_idxs=cat_idxs,
+            cat_dims=cat_dims,
             cat_emb_dim=cat_emb_dim,
             text_dim=None,  # No fusion in encoder
             use_checkpointing=use_checkpointing,
